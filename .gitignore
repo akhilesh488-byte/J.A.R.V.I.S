@@ -1,0 +1,29 @@
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Data & Runtime Files
+data/*.png
+data/*.wav
+data/screenshot.png
+data/jarvis_command.wav
+
+# Secrets and OAuth Credentials
+credentials.json
+token.json
+.env
+
+# OS & Editor Files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/

@@ -1,0 +1,19 @@
+anthropic
+openai
+google-generativeai
+faster-whisper
+av<14
+pyttsx3
+pyaudio
+openwakeword
+mss
+plyer
+Pillow
+numpy
+
+# Phase 2 (optional, only needed if you configure the corresponding keys)
+deepgram-sdk
+elevenlabs
+google-auth
+google-auth-oauthlib
+google-api-python-client
