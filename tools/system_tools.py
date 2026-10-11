@@ -22,51 +22,51 @@ def _current_os() -> str:
     return "linux"
 
 
-import re
-
-
 def open_app(app_name: str) -> str:
     """
     Open an application by its voice-friendly name.
     Looks up config.APP_ALIASES first; falls back to trying the raw
     name as a shell command if there's no alias.
+
+    Windows notes:
+    - If the command looks like a URI (contains ":" or "/"), or is a
+      multi-word shell command, we use 'start' via subprocess so the
+      shell can resolve it.
+    - For single-word names (e.g. "code", "explorer"), os.startfile()
+      / ShellExecute is used; it searches PATH *and* app registrations,
+      so registered apps like Notepad, Calculator, etc. all work.
     """
     os_key = _current_os()
-    # Strip punctuation, leading "the", "up", "a", "an", and trailing "app"
-    clean = re.sub(r"[^\w\s-]", "", app_name).strip().lower()
-    clean = re.sub(r"^(?:the|up|a|an)\s+", "", clean)
-    clean = re.sub(r"\s+app$", "", clean)
-    clean = re.sub(r"^(?:the|up|a|an)\s+", "", clean)
+    name = app_name.strip().lower()
 
-    alias_entry = config.APP_ALIASES.get(clean)
-    if not alias_entry:
-        alias_entry = config.APP_ALIASES.get(clean.replace(" ", ""))
-
-    command = alias_entry[os_key] if alias_entry else clean
-    display_name = clean.title() if clean else app_name.strip()
+    alias_entry = config.APP_ALIASES.get(name)
+    command = alias_entry[os_key] if alias_entry else name
 
     try:
         if os_key == "windows":
-            # 1. URL or URI protocol (e.g. spotify:, https://)
-            if command.startswith(("http://", "https://")) or command.endswith(":"):
+            # URIs (spotify:, shell:, https:) and multi-token commands
+            # go through the shell 'start' builtin.
+            is_uri = ":" in command or command.startswith("\\")
+            is_multi = " " in command.strip()
+            if is_uri or is_multi:
+                subprocess.Popen(f'start "" {command}', shell=True)
+            else:
+                # ShellExecute path: finds PATH executables AND registered
+                # app names (UWP, file-type associations, etc.)
                 os.startfile(command)
-                return f"Opening {display_name}."
-
-            # 2. Try os.startfile for registered Windows executables and app aliases
-            try:
-                os.startfile(command)
-                return f"Opening {display_name}."
-            except Exception:
-                pass
-
-            # 3. Fallback to start command with empty title parameter
-            subprocess.Popen(f'start "" {command}', shell=True)
-            return f"Opening {display_name}."
         else:
             subprocess.Popen(command, shell=True)
-            return f"Opening {display_name}."
+        return f"Opening {app_name}."
+    except FileNotFoundError:
+        # os.startfile raised because the name wasn't found anywhere;
+        # fall back to the shell so the user gets a real error message.
+        try:
+            subprocess.Popen(f'start "" {command}', shell=True)
+            return f"Opening {app_name}."
+        except Exception as e:
+            return f"Couldn't open {app_name}: {e}"
     except Exception as e:
-        return f"Couldn't open {display_name}: {e}"
+        return f"Couldn't open {app_name}: {e}"
 
 
 def take_screenshot(save_path: str = None) -> str:

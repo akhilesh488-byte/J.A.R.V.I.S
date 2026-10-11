@@ -1,19 +1,11 @@
-anthropic
-openai
-google-generativeai
+# Local core (free, offline)
+numpy
 faster-whisper
-av<14
 pyttsx3
 pyaudio
 openwakeword
+onnxruntime
 mss
 plyer
 Pillow
-numpy
-
-# Phase 2 (optional, only needed if you configure the corresponding keys)
-deepgram-sdk
-elevenlabs
-google-auth
-google-auth-oauthlib
-google-api-python-client
+TTS torch

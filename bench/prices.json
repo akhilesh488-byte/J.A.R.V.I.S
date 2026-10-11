@@ -1,0 +1,8 @@
+{
+  "_note": "Fill from each provider's pricing page and record the date. Cost is left blank until you do. USD per million tokens.",
+  "date": null,
+  "models": {
+    "claude-sonnet-4-6": {"in_per_mtok": null, "out_per_mtok": null},
+    "gpt-4o": {"in_per_mtok": null, "out_per_mtok": null}
+  }
+}

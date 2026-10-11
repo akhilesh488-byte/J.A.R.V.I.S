@@ -1,0 +1,9 @@
+# Only for the cloud pieces you actually use
+anthropic
+openai
+google-generativeai
+deepgram-sdk
+elevenlabs
+google-auth
+google-auth-oauthlib
+google-api-python-client

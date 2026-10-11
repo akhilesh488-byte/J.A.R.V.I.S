@@ -7,7 +7,13 @@ Defines the tools Jarvis exposes, both as:
 Adding a new capability later = write the function, add one entry here.
 """
 
-from tools import system_tools, todo_tools, alarm_tools, gmail_tools, calendar_tools, drive_tools
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config
+from tools import system_tools, todo_tools, alarm_tools, gmail_tools, calendar_tools, drive_tools, memory_tools
+from tools.mock_tools import MockTools
 
 TOOL_SCHEMAS = [
     {
@@ -120,15 +126,44 @@ TOOL_SCHEMAS = [
             "properties": {"count": {"type": "integer", "description": "How many files to list, default 5"}},
         },
     },
+    {
+        "name": "remember_note",
+        "description": "Save a short note the user asked you to remember for later conversations.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"note": {"type": "string", "description": "What to remember"}},
+            "required": ["note"],
+        },
+    },
 ]
 
 
-def build_dispatch_table(speak_fn):
+# Tools that exist only when memory is on (and benchmark mode is off), so
+# benchmark runs always send the same tool schema.
+MEMORY_TOOL_NAMES = {"remember_note"}
+
+
+def get_tool_schemas():
+    if config.BENCHMARK_MODE or not config.USE_MEMORY:
+        return [t for t in TOOL_SCHEMAS if t["name"] not in MEMORY_TOOL_NAMES]
+    return TOOL_SCHEMAS
+
+
+def build_mock():
+    """A MockTools covering every tool the LLM can see in benchmark mode."""
+    return MockTools([t["name"] for t in get_tool_schemas()])
+
+
+def build_dispatch_table(speak_fn, mock=None):
     """
-    Returns {tool_name: callable} where alarm tools are pre-wired with
-    speak_fn so they can announce themselves out loud when they fire.
+    Returns {tool_name: callable}. Alarm tools are pre-wired with speak_fn so
+    they can announce themselves. If a MockTools is passed, every tool is
+    replaced by a recording stub (benchmark use).
     """
+    if mock is not None:
+        return mock.table()
     return {
+        "remember_note": lambda note: memory_tools.remember_note(note),
         "open_app": lambda app_name: system_tools.open_app(app_name),
         "add_todo": lambda task: todo_tools.add_todo(task),
         "list_todos": lambda **_: todo_tools.list_todos(),

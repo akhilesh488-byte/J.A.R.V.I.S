@@ -1,27 +1,39 @@
 """
-Every model client implements the same tiny interface so the router
-and model_manager don't need to know which provider they're talking to.
+Every model client implements the same tiny interface, plus a
+`last_stats` dict filled in by each ask() call (used by the benchmark
+and by the router's logging).
 """
 
 from abc import ABC, abstractmethod
 
 
+def new_stats(model_id=""):
+    return {
+        "model": model_id,
+        "latency_ms": 0.0,      # time spent inside API calls only (not tools)
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "iterations": 0,
+        "tool_calls": [],       # [{"tool": name, "args": {...}}] in call order
+    }
+
+
 class ModelClient(ABC):
     name: str = "base"
 
+    def __init__(self):
+        self.last_stats = new_stats()
+
     @abstractmethod
     def is_available(self) -> bool:
-        """Return True if this client has what it needs (e.g. an API key) to run."""
+        """True if this client has what it needs (API key, local model name)."""
         raise NotImplementedError
 
     @abstractmethod
     def ask(self, prompt: str, dispatch_table: dict, image_path: str = None) -> str:
         """
-        Send `prompt` to the model. If the model decides to use a tool
-        (from dispatch_table), execute it and feed the result back,
-        looping until the model gives a final text answer.
-        If image_path is given, attach it (for "what's on my screen" style
-        questions) — implementers that don't support vision can ignore it.
-        Returns the final text response to speak back to the user.
+        Send `prompt` to the model, run any tool calls it makes through
+        dispatch_table, loop until it gives a final answer, return the text.
+        Fills self.last_stats. Raises on API errors (the router handles them).
         """
         raise NotImplementedError

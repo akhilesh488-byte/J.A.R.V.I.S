@@ -1,0 +1,40 @@
+open spotify
+open youtube
+open chrome
+open gmail
+open calculator
+open terminal
+open notepad
+open file explorer
+open settings
+open task manager
+add buy groceries to my todo list
+add call mom to my todo list
+add pick up laundry to my todo list
+add send report to my todo list
+add fix bug to my todo list
+mark buy groceries as done
+mark call mom as done
+mark pick up laundry as done
+what's on my to-do list
+list my tasks
+set a timer for five minutes
+set a timer for ten minutes
+set a timer for thirty seconds
+open vs code
+open visual studio code
+open whatsapp
+open netflix
+open github
+open reddit
+add dentist appointment to my todo list
+mark dentist appointment as done
+add buy milk to my todo list
+mark buy milk as done
+add team meeting to my todo list
+what tasks do I have
+open maps
+open google maps
+set a timer for two minutes
+add finish homework to my todo list
+mark finish homework as done

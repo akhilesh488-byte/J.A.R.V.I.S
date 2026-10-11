@@ -20,21 +20,22 @@ _client = None
 
 
 def _play(audio_path: str) -> None:
-    # Keep playback dependency-light: shell out to whatever's available
-    # rather than pulling in a full audio-playback library.
-    players = (
-        ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", audio_path]
-        if os.name != "nt"
-        else ["powershell", "-c", f'(New-Object Media.SoundPlayer "{audio_path}").PlaySync();']
-    )
-    try:
-        subprocess.run(players, check=True)
-    except Exception:
-        # Fallback attempt with mpg123 on Linux
-        try:
-            subprocess.run(["mpg123", "-q", audio_path], check=True)
-        except Exception as e:
-            print(f"Couldn't play audio ({e}); is ffplay or mpg123 installed?")
+    # ffplay first (works on Windows and Linux if ffmpeg is installed),
+    # then mpg123, then on Windows hand the file to the default player.
+    import shutil
+
+    for cmd in (["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", audio_path],
+                ["mpg123", "-q", audio_path]):
+        if shutil.which(cmd[0]):
+            try:
+                subprocess.run(cmd, check=True)
+                return
+            except Exception:
+                pass
+    if os.name == "nt":
+        os.startfile(audio_path)  # opens the default player; doesn't block
+    else:
+        print("Couldn't play audio: install ffmpeg (ffplay) or mpg123.")
 
 
 def speak(text: str) -> None:

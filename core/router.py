@@ -1,126 +1,159 @@
 """
 Decides what to do with a transcribed voice command.
 
-Simple, high-confidence patterns (open app, add/list/complete todo,
-timers) are handled directly without involving an LLM at all — this
-keeps common actions fast and free. Anything else, or anything that
-explicitly names a model ("ask claude...", "jarvis activate gemini"),
-goes to the chosen LLM, which has the same tools available via
-function-calling so it can still take actions, not just talk.
+1. classify_regex(): cheap deterministic patterns for simple commands
+   (open app, to-do add/list/complete, optionally timers). A match is
+   executed straight through the dispatch table: no LLM, no cost.
+2. Everything else goes to an LLM, which sees the same tools through
+   function calling and can act as well as talk.
+
+These patterns are a v1 baseline. Tune them on the DEV split only, then
+freeze them before touching the test split (see the paper blueprint).
+Known weakness, kept on purpose so it can be measured: the open-app
+pattern fires on things like "what is an open question".
 """
 
 import os
 import re
 import sys
+import time
+from dataclasses import dataclass, field
+from typing import Optional
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tools import system_tools, todo_tools, alarm_tools
+import config
+from tools import system_tools
 from tools.tool_registry import build_dispatch_table
 
-from datetime import datetime
-
 MODEL_NAME_PATTERN = re.compile(
-    r"\b(?:ask|activate|use|switch to)\s+(claude|chatgpt|gpt|gemini|openai)\b", re.I
+    r"\b(?:ask|activate|use|switch to)\s+(claude|chatgpt|gpt|gemini|openai|local|ollama)\b", re.I
 )
 
-OPEN_APP_PATTERN = re.compile(r"\b(?:open|launch|start|run|play)\s+(.+)", re.I)
+OPEN_APP_PATTERN = re.compile(r"\bopen\s+(.+)", re.I)
 ADD_TODO_PATTERN = re.compile(
-    r"\badd\s+(?:a\s+)?(?:task|todo|to[- ]do)\s*(?:to\s+)?(?:my\s+list\s+)?(?:to\s+)?(.+)",
-    re.I,
-)
+    r"\badd\s+(?:a\s+)?(?:task|todo|to[- ]do)\s*(?:to\s+)?(?:my\s+list\s+)?(?:to\s+)?(.+)", re.I)
 ADD_TODO_ALT_PATTERN = re.compile(
-    r"\badd\s+(.+?)\s+to\s+(?:my\s+)?(?:to[- ]?do\s*(?:list)?|tasks?\s*(?:list)?)\b",
-    re.I,
-)
+    r"\badd\s+(.+?)\s+to\s+(?:my\s+)?(?:to[- ]?do\s+)?(?:list|tasks)\b", re.I)
 LIST_TODO_PATTERN = re.compile(
-    r"\b(?:list|what(?:\x27s|\s+is)\s+on|show)\s+(?:my\s+)?(?:to[- ]?dos?|tasks?)(?:\s+list)?\b",
-    re.I,
-)
+    r"\b(?:list|what'?s on|show)\s+(?:my\s+)?(?:to[- ]?do\s*list|tasks)\b", re.I)
 COMPLETE_TODO_PATTERN = re.compile(
-    r"\b(?:mark|check off|complete|finish)\s+(.+?)\s+(?:as\s+)?(?:done|complete)\b", re.I
-)
+    r"\b(?:mark|check off|complete|finish)\s+(.+?)\s+(?:as\s+)?(?:done|complete)\b", re.I)
 TIMER_PATTERN = re.compile(
-    r"\b(?:set\s+(?:a\s+)?timer\s+(?:for\s+)?|timer\s+for\s+)(\d+)\s*(minute|min|m|second|sec|s)?",
-    re.I,
-)
-TIME_PATTERN = re.compile(
-    r"\b(?:what(?:\x27s|\s+is)\s+(?:the\s+)?time|what\s+time\s+is\s+it|current\s+time)\b",
-    re.I,
-)
-DATE_PATTERN = re.compile(
-    r"\b(?:what(?:\x27s|\s+is)\s+(?:the\s+date|today\x27s\s+date)|what\s+day\s+is\s+(?:it|today))\b",
-    re.I,
-)
+    r"\bset\s+(?:a\s+)?timer\s+for\s+(\d+)\s*(second|sec|minute|min|hour|hr)s?\b", re.I)
 SCREEN_PATTERN = re.compile(r"\b(?:screen|what.*(?:looking at|on my screen))\b", re.I)
+
+_UNIT_SECONDS = {"second": 1, "sec": 1, "minute": 60, "min": 60, "hour": 3600, "hr": 3600}
 
 
 def extract_requested_model(text: str):
-    match = MODEL_NAME_PATTERN.search(text)
-    return match.group(1) if match else None
+    m = MODEL_NAME_PATTERN.search(text)
+    return m.group(1) if m else None
 
 
-def handle_command(text: str, model_manager, speak_fn):
+def classify_regex(text: str):
     """
-    Returns the text to speak back to the user.
+    Returns (tool_name, args) if a regex pattern claims this command, else
+    None. Pure function: executes nothing, so it can be used to build the
+    router's confusion matrix without side effects.
     """
-    dispatch_table = build_dispatch_table(speak_fn)
-
-    # 1. Direct, no-LLM-needed patterns first (fast + free).
-    # Time and Date
-    if TIME_PATTERN.search(text):
-        return f"It is currently {datetime.now().strftime('%I:%M %p')}."
-
-    if DATE_PATTERN.search(text):
-        return f"Today is {datetime.now().strftime('%A, %B %d, %Y')}."
-
-    # App Launcher
     m = OPEN_APP_PATTERN.search(text)
     if m and "screen" not in text.lower():
-        target = m.group(1).strip()
-        target = re.sub(r"[.?!,]+$", "", target).strip()
-        target = re.sub(r"\bplease\b", "", target, flags=re.I).strip()
-        target = re.sub(r"^(?:up|the|a|an)\s+", "", target, flags=re.I).strip()
-        target = re.sub(r"\s+app$", "", target, flags=re.I).strip()
-        target = re.sub(r"^(?:up|the|a|an)\s+", "", target, flags=re.I).strip()
-        return system_tools.open_app(target)
+        return "open_app", {"app_name": m.group(1).strip()}
 
-    # To-Do Management
-    m = ADD_TODO_PATTERN.search(text) or ADD_TODO_ALT_PATTERN.search(text)
+    m = ADD_TODO_PATTERN.search(text)
     if m:
-        item = m.group(1).strip().rstrip(".?!")
-        return todo_tools.add_todo(item)
+        return "add_todo", {"task": m.group(1).strip()}
+    m = ADD_TODO_ALT_PATTERN.search(text)
+    if m:
+        return "add_todo", {"task": m.group(1).strip()}
 
     if LIST_TODO_PATTERN.search(text):
-        return todo_tools.list_todos()
+        return "list_todos", {}
 
     m = COMPLETE_TODO_PATTERN.search(text)
     if m:
-        item = m.group(1).strip().rstrip(".?!")
-        return todo_tools.complete_todo(item)
+        return "complete_todo", {"task_hint": m.group(1).strip()}
 
-    # Timer
-    m = TIMER_PATTERN.search(text)
-    if m:
-        val = int(m.group(1))
-        unit = (m.group(2) or "minute").lower()
-        seconds = val * 60 if unit.startswith("m") else val
-        return alarm_tools.set_timer(seconds, speak_fn=speak_fn)
+    if config.ENABLE_TIMER_REGEX:
+        m = TIMER_PATTERN.search(text)
+        if m:
+            seconds = int(m.group(1)) * _UNIT_SECONDS[m.group(2).lower()]
+            return "set_timer", {"seconds": seconds}
 
-    # 2. Screen-reading question -> take a screenshot, hand to the LLM with the image.
-    image_path = None
-    if SCREEN_PATTERN.search(text):
+    return None
+
+
+@dataclass
+class RouteResult:
+    reply: str
+    path: str                       # "regex" | "llm" | "none"
+    tool: Optional[str] = None      # regex path: the tool that was called
+    args: dict = field(default_factory=dict)
+    router_ms: float = 0.0          # time to decide (regex matching)
+    tool_ms: float = 0.0            # regex path: time to run the tool
+    llm_ms: float = 0.0             # LLM path: time inside API calls
+    stats: dict = field(default_factory=dict)  # last client stats (tokens, iterations, calls)
+    model: Optional[str] = None
+    error: Optional[str] = None
+
+
+def route(text, model_manager, dispatch_table, force_llm=False, capture_screen=True,
+          image_path=None, requested_model=None) -> RouteResult:
+    """
+    force_llm=True skips the regex step (the always-LLM baseline).
+    capture_screen=False stops the router from grabbing the live screen
+    (benchmarks pass fixed screenshots through image_path instead).
+    """
+    t0 = time.perf_counter()
+    decision = None if force_llm else classify_regex(text)
+    router_ms = (time.perf_counter() - t0) * 1000.0
+
+    if decision:
+        tool, args = decision
+        t1 = time.perf_counter()
+        try:
+            reply = str(dispatch_table[tool](**args))
+            err = None
+        except Exception as e:
+            reply, err = f"That didn't work: {e}", str(e)
+        tool_ms = (time.perf_counter() - t1) * 1000.0
+        return RouteResult(reply=reply, path="regex", tool=tool, args=args,
+                           router_ms=router_ms, tool_ms=tool_ms, error=err)
+
+    if image_path is None and capture_screen and SCREEN_PATTERN.search(text):
         try:
             image_path = system_tools.take_screenshot()
         except RuntimeError as e:
-            return str(e)
+            return RouteResult(reply=str(e), path="none", router_ms=router_ms, error=str(e))
 
-    # 3. Everything else (including explicit "ask claude..." requests) -> LLM.
-    requested_model = extract_requested_model(text)
-    client = model_manager.resolve(requested_model)
-    if client is None:
-        return (
-            "I don't have any AI models configured yet — add an API key "
-            "to config.py to enable that."
-        )
+    requested = requested_model or extract_requested_model(text)
+    candidates = model_manager.candidates(requested)
+    if not candidates:
+        return RouteResult(
+            reply=("I don't have an AI model set up yet. Add an API key to .env, "
+                   "or set LOCAL_LLM_MODEL to use Ollama."),
+            path="none", router_ms=router_ms, error="no_model")
 
-    return client.ask(text, dispatch_table, image_path=image_path)
+    # Try the first candidate; fall through to the next on an API error,
+    # except in benchmark mode where errors must be recorded, not hidden.
+    tries = candidates[:1] if config.BENCHMARK_MODE else candidates
+    last_err = None
+    for client in tries:
+        try:
+            reply = client.ask(text, dispatch_table, image_path=image_path)
+            stats = dict(client.last_stats)
+            return RouteResult(reply=reply, path="llm", router_ms=router_ms,
+                               llm_ms=stats.get("latency_ms", 0.0), stats=stats,
+                               model=stats.get("model") or client.name)
+        except Exception as e:
+            last_err = f"{client.name}: {e}"
+    return RouteResult(reply="I couldn't reach any AI model just now.", path="llm",
+                       router_ms=router_ms, error=last_err,
+                       model=tries[0].name if tries else None,
+                       stats=dict(tries[0].last_stats) if tries else {})
+
+
+def handle_command(text: str, model_manager, speak_fn) -> str:
+    """Normal (non-benchmark) entry point: returns the text to speak."""
+    dispatch_table = build_dispatch_table(speak_fn)
+    return route(text, model_manager, dispatch_table).reply

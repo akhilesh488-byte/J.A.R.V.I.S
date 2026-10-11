@@ -1,66 +1,135 @@
 """
-Jarvis — Phase 1
+Jarvis
 
-Loop: wake word -> record command -> transcribe -> route -> speak reply.
+  python main.py                 # mode from JARVIS_MODE (default: wake)
+  python main.py --mode text     # type commands, no microphone needed
+  python main.py --mode ptt      # press Enter, speak, it stops when you pause
+  python main.py --mode wake     # always listening for the wake word
 
-Run with:  python main.py
+Start with text mode. Get that working, then add voice.
 """
 
+import argparse
 import os
+import time
 
 import config
-from audio import wakeword, stt, tts
 from core.router import handle_command
 from models.model_manager import ModelManager
 
 model_manager = ModelManager()
 
 
-def on_wake():
-    tts.speak("Yes?")
-    wav_path = None
-    try:
-        wav_path = stt.record_command()
-        text = stt.transcribe(wav_path)
-    except Exception as e:
-        print(f"Error capturing command: {e}")
-        tts.speak("Sorry, I had trouble hearing that.")
-        return
-    finally:
+def speak(text):
+    from audio import tts
+
+    tts.speak(text)
+
+
+def print_dialogue(user_text=None, jarvis_text=None):
+    border = "=" * 70
+    if user_text:
+        print(f"\n{border}", flush=True)
+        print(f"  YOU    : \"{user_text}\"", flush=True)
+    if jarvis_text:
+        if not user_text:
+            print(f"\n{border}", flush=True)
+        print(f"  JARVIS : \"{jarvis_text}\"", flush=True)
+        print(f"{border}\n", flush=True)
+
+
+def say_and_print(text, voice=True):
+    print_dialogue(jarvis_text=text)
+    if voice:
+        speak(text)
+
+
+def run_text(voice):
+    print("Text mode. Type a command (or 'quit').")
+    while True:
         try:
-            if wav_path and os.path.exists(wav_path):
-                os.remove(wav_path)
-        except Exception:
-            pass
+            text = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if text.lower() in ("quit", "exit"):
+            break
+        if text:
+            print_dialogue(user_text=text)
+            say_and_print(handle_command(text, model_manager, speak), voice)
 
+
+def handle_spoken(voice=True):
+    from audio import stt
+
+    # Small delay so the microphone doesn't capture speaker output (echo).
+    if config.TTS_POST_SPEAK_DELAY > 0:
+        time.sleep(config.TTS_POST_SPEAK_DELAY)
+
+    wav = stt.record_command()
+    text = stt.transcribe(wav)
     if not text.strip():
-        tts.speak("I didn't catch that.")
+        say_and_print("I didn't catch that, sir.", voice)
         return
+    print_dialogue(user_text=text)
+    say_and_print(handle_command(text, model_manager, speak), voice)
 
-    print(f"You said: {text}")
+
+def run_ptt():
+    print("Push to talk. Press Enter, then speak. Ctrl+C to quit.")
     try:
-        reply = handle_command(text, model_manager, tts.speak)
-    except Exception as e:
-        print(f"Error handling command: {e}")
-        reply = f"Sorry, I encountered an issue: {e}"
+        while True:
+            input("[Enter to talk] ")
+            handle_spoken()
+    except (EOFError, KeyboardInterrupt):
+        print()
 
-    if reply:
-        tts.speak(reply)
+
+def run_wake():
+    from audio import wakeword
+
+    def on_wake():
+        speak("Yes?")
+        handle_spoken()
+
+    wakeword.listen_for_wake_word(on_wake, model=config.WAKE_WORD_MODEL,
+                                  threshold=config.WAKE_WORD_THRESHOLD)
+
+
+def print_status():
+    brains = model_manager.available()
+    print("Jarvis starting.")
+    print(f"  Brain : {', '.join(brains) if brains else 'none configured (see .env.example)'}")
+    ears = ("Deepgram (cloud)" if config.STT_PROVIDER == "deepgram" else
+            f"faster-whisper {config.WHISPER_MODEL_SIZE} on {config.WHISPER_DEVICE} (local)")
+    mouth = "ElevenLabs (cloud)" if config.TTS_PROVIDER == "elevenlabs" else "pyttsx3 (local)"
+    print(f"  Ears  : {ears}")
+    print(f"  Voice : {mouth}")
+    print(f"  Memory: {'on' if config.USE_MEMORY else 'off'}")
 
 
 def main():
-    os.makedirs(config.DATA_DIR, exist_ok=True)
-    print("Starting Jarvis...")
-    print("Configured models available:", [
-        name for name in config.MODEL_PRIORITY
-        if model_manager.get_client(name) and model_manager.get_client(name).is_available()
-    ] or "none — add API keys to config.py")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--mode", choices=["wake", "ptt", "text", "local"], default="local")
+    ap.add_argument("--no-voice", action="store_true", help="text mode: don't speak replies")
+    args = ap.parse_args()
 
-    wakeword.listen_for_wake_word(
-        on_wake,
-        model_path=None,  # set this once you've trained/downloaded a "jarvis" model
-        threshold=config.WAKE_WORD_THRESHOLD,
-    )
+    if args.mode == "local":
+        import jarvis_local
+        jarvis_local.main()
+        return
+
+    os.makedirs(config.DATA_DIR, exist_ok=True)
+    print_status()
+    try:
+        if args.mode == "text":
+            run_text(voice=not args.no_voice)
+        elif args.mode == "ptt":
+            run_ptt()
+        else:
+            run_wake()
+    except (KeyboardInterrupt, SystemExit):
+        say_and_print("Powering down systems. Good day, sir.", voice=not args.no_voice)
 
 
 if __name__ == "__main__":

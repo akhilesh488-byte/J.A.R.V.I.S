@@ -1,0 +1,18 @@
+# Optional STT engine dependencies.
+# Install only what you need on top of requirements.txt.
+#
+# faster-whisper (already in requirements.txt — no action needed)
+#
+# Deepgram (cloud):
+deepgram-sdk
+#
+# OpenAI gpt-4o-transcribe (cloud):
+openai
+#
+# ElevenLabs Scribe (cloud):
+elevenlabs
+#
+# cohere_transcribe engine (local, HuggingFace Whisper-large-v3, needs GPU recommended):
+# transformers
+# accelerate
+# torch

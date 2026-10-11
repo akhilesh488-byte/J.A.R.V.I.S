@@ -1,0 +1,7 @@
+# Benchmark and paper figures
+jiwer
+pandas
+matplotlib
+scipy
+scikit-learn
+sentence-transformers
