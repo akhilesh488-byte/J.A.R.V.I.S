@@ -16,6 +16,7 @@ class ModelManager:
             "openai": OpenAIClient(),
             "gemini": GeminiClient(),
             "local": LocalClient(),
+            "ollama": OllamaManagerClient(model_manager=self),
             "ollama_manager": OllamaManagerClient(model_manager=self),
         }
 
@@ -35,7 +36,18 @@ class ModelManager:
             key = config.MODEL_ALIASES.get(requested.strip().lower(), requested.strip().lower())
             if key:
                 order.append(key)
+
+        env_provider = os.environ.get("MODEL_PROVIDER", "").strip().lower()
+        if env_provider in ("ollama", "local"):
+            if "ollama_manager" not in order:
+                order.append("ollama_manager")
+            if "ollama" not in order:
+                order.append("ollama")
+
         order += [k for k in config.MODEL_PRIORITY if k not in order]
+        if "ollama_manager" not in order:
+            order.append("ollama_manager")
+
         return [self._clients[k] for k in order
                 if k in self._clients and self._clients[k].is_available()]
 

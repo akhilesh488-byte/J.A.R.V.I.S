@@ -161,10 +161,12 @@ def route(text, model_manager, dispatch_table, force_llm=False, capture_screen=T
     last_err = None
     for client in tries:
         try:
-            reply = client.ask(text, dispatch_table, image_path=image_path)
+            raw_res = client.ask(text, dispatch_table, image_path=image_path)
             stats = dict(client.last_stats)
-            return RouteResult(reply=reply, path="llm", router_ms=router_ms,
-                               llm_ms=stats.get("latency_ms", 0.0), stats=stats,
+            reply_str = raw_res.get("reply", "") if isinstance(raw_res, dict) else str(raw_res)
+            llm_ms = stats.get("llm_latency_ms", stats.get("latency_ms", 0.0))
+            return RouteResult(reply=reply_str, path="llm", router_ms=router_ms,
+                               llm_ms=llm_ms, stats=stats,
                                model=stats.get("model") or client.name)
         except Exception as e:
             last_err = f"{client.name}: {e}"

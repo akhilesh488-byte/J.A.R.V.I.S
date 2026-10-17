@@ -655,8 +655,25 @@ class JarvisPersonalityRouter:
             return True
 
         # -------------------------------------------------------------------
-        # UNKNOWN COMMAND
+        # UNKNOWN COMMAND -> Fall back to Ollama model
         # -------------------------------------------------------------------
+        log_status(f"Unrecognized command: '{text}'. Falling back to Ollama model...")
+        try:
+            from models.ollama_manager_client import OllamaManagerClient
+            ollama_client = OllamaManagerClient()
+            if ollama_client.is_available():
+                log_status(f"Querying Ollama model ({ollama_client.model})...")
+                res = ollama_client.ask(command)
+                reply = res.get("reply")
+                if reply and not res.get("error"):
+                    display_dialogue("JARVIS (Ollama)", reply)
+                    speak(reply)
+                    return True
+                else:
+                    log_status(f"Ollama returned error: {res.get('error')}")
+        except Exception as e:
+            log_status(f"Ollama fallback error: {e}")
+
         log_status(f"Command not recognized: {text}")
         speak("Command unrecognized, sir. Standing by.")
         return False

@@ -56,14 +56,14 @@ class OllamaManagerClient:
         model: Optional[str] = None,
         host: Optional[str] = None,
         cascade_enabled: bool = False,
-        timeout: float = 30.0,
+        timeout: Optional[float] = None,
         model_manager: Any = None,
     ):
-        self.model = model or os.environ.get("OLLAMA_MODEL", "jarvis-3b")
-        raw_host = host or os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+        self.model = model or os.environ.get("LOCAL_LLM_MODEL") or os.environ.get("OLLAMA_MODEL", "jarvis-3b")
+        raw_host = host or os.environ.get("OLLAMA_BASE_URL") or os.environ.get("OLLAMA_HOST", "http://localhost:11434")
         self.host = raw_host.rstrip("/")
         self.cascade_enabled = cascade_enabled
-        self.timeout = timeout
+        self.timeout = timeout if timeout is not None else float(os.environ.get("OLLAMA_TIMEOUT", "90.0"))
         self.model_manager = model_manager
         self.last_stats: Dict[str, Any] = {}
 
@@ -203,10 +203,22 @@ class OllamaManagerClient:
             "escalated": False,
         }
 
-    def ask(self, user_input: str, history: Optional[List[Dict[str, str]]] = None, force_mock: bool = False) -> dict:
+    def ask(
+        self,
+        user_input: str,
+        dispatch_table: Optional[Any] = None,
+        image_path: Optional[str] = None,
+        history: Optional[List[Dict[str, str]]] = None,
+        force_mock: bool = False,
+        **kwargs,
+    ) -> dict:
         """
         Interacts with local Ollama manager model with tool execution and multi-turn loops.
         """
+        if isinstance(dispatch_table, list) and history is None:
+            history = dispatch_table
+            dispatch_table = None
+
         system_prompt = self._build_system_prompt()
         messages: List[Dict[str, str]] = []
 
@@ -317,7 +329,9 @@ class OllamaManagerClient:
                 # Execute tool
                 t_exec_0 = time.perf_counter()
                 try:
-                    if force_mock:
+                    if dispatch_table is not None:
+                        dispatch = dispatch_table
+                    elif force_mock:
                         dispatch = mock_instance.table()
                     else:
                         dispatch = build_dispatch_table(speak_fn=None)
