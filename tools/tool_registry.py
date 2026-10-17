@@ -1,7 +1,7 @@
 """
 Defines the tools Jarvis exposes, both as:
   1. a dispatch table (name -> python function) for direct execution, and
-  2. JSON schemas in Anthropic's tool-use format, so an LLM can decide
+  2. JSON schemas in Anthropic/standard tool-use format, so an LLM can decide
      to call them itself when a request doesn't match a simple pattern.
 
 Adding a new capability later = write the function, add one entry here.
@@ -9,6 +9,7 @@ Adding a new capability later = write the function, add one entry here.
 
 import os
 import sys
+from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
@@ -106,7 +107,7 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "create_event",
-        "description": "Create a Google Calendar event. Convert any spoken relative time (e.g. 'tomorrow at 3pm') into ISO 8601 datetimes before calling this.",
+        "description": "Create a Google Calendar event. Convert any spoken relative time into ISO 8601 datetimes.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -137,10 +138,49 @@ TOOL_SCHEMAS = [
     },
 ]
 
+# Exact typed signatures and metadata for tool validation
+TOOL_SIGNATURES: Dict[str, Dict[str, Any]] = {
+    "open_app": {"required": ["app_name"], "optional": []},
+    "add_todo": {"required": ["task"], "optional": []},
+    "list_todos": {"required": [], "optional": []},
+    "complete_todo": {"required": ["task_hint"], "optional": []},
+    "set_timer": {"required": ["seconds"], "optional": ["label"]},
+    "set_alarm_at": {"required": ["hour", "minute"], "optional": ["label"]},
+    "list_recent_emails": {"required": [], "optional": ["count"]},
+    "create_email_draft": {"required": ["to", "subject", "body"], "optional": []},
+    "list_upcoming_events": {"required": [], "optional": ["count"]},
+    "create_event": {"required": ["summary", "start_time", "end_time"], "optional": ["description"]},
+    "list_recent_files": {"required": [], "optional": ["count"]},
+    "remember_note": {"required": ["note"], "optional": []},
+}
 
-# Tools that exist only when memory is on (and benchmark mode is off), so
-# benchmark runs always send the same tool schema.
 MEMORY_TOOL_NAMES = {"remember_note"}
+
+
+def validate_tool_call(tool_name: str, args: Optional[dict] = None) -> Tuple[bool, Optional[str]]:
+    """
+    Validate that tool_name exists and provided args satisfy the tool signature.
+    """
+    if not isinstance(tool_name, str):
+        return False, "Tool name must be a string."
+    if tool_name not in TOOL_SIGNATURES:
+        return False, f"Unknown tool: '{tool_name}'."
+    if args is None:
+        args = {}
+    if not isinstance(args, dict):
+        return False, f"Tool arguments must be a dictionary, got {type(args).__name__}."
+
+    sig = TOOL_SIGNATURES[tool_name]
+    missing = [req for req in sig["required"] if req not in args]
+    if missing:
+        return False, f"Missing required arguments for {tool_name}: {missing}"
+
+    allowed = set(sig["required"]) | set(sig["optional"])
+    unexpected = [k for k in args if k not in allowed]
+    if unexpected:
+        return False, f"Unexpected arguments for {tool_name}: {unexpected}"
+
+    return True, None
 
 
 def get_tool_schemas():
@@ -154,7 +194,7 @@ def build_mock():
     return MockTools([t["name"] for t in get_tool_schemas()])
 
 
-def build_dispatch_table(speak_fn, mock=None):
+def build_dispatch_table(speak_fn=None, mock=None):
     """
     Returns {tool_name: callable}. Alarm tools are pre-wired with speak_fn so
     they can announce themselves. If a MockTools is passed, every tool is
@@ -166,17 +206,17 @@ def build_dispatch_table(speak_fn, mock=None):
         "remember_note": lambda note: memory_tools.remember_note(note),
         "open_app": lambda app_name: system_tools.open_app(app_name),
         "add_todo": lambda task: todo_tools.add_todo(task),
-        "list_todos": lambda **_: todo_tools.list_todos(),
+        "list_todos": lambda: todo_tools.list_todos(),
         "complete_todo": lambda task_hint: todo_tools.complete_todo(task_hint),
-        "set_timer": lambda seconds, label="": alarm_tools.set_timer(seconds, label, speak_fn),
-        "set_alarm_at": lambda hour, minute, label="": alarm_tools.set_alarm_at(
-            hour, minute, label, speak_fn
+        "set_timer": lambda seconds, label=None: alarm_tools.set_timer(seconds, label or "", speak_fn),
+        "set_alarm_at": lambda hour, minute, label=None: alarm_tools.set_alarm_at(
+            hour, minute, label or "", speak_fn
         ),
-        "list_recent_emails": lambda count=5: gmail_tools.list_recent_emails(count),
+        "list_recent_emails": lambda count=None: gmail_tools.list_recent_emails(count if count is not None else 5),
         "create_email_draft": lambda to, subject, body: gmail_tools.create_email_draft(to, subject, body),
-        "list_upcoming_events": lambda count=5: calendar_tools.list_upcoming_events(count),
-        "create_event": lambda summary, start_time, end_time, description="": calendar_tools.create_event(
-            summary, start_time, end_time, description
+        "list_upcoming_events": lambda count=None: calendar_tools.list_upcoming_events(count if count is not None else 5),
+        "create_event": lambda summary, start_time, end_time, description=None: calendar_tools.create_event(
+            summary, start_time, end_time, description or ""
         ),
-        "list_recent_files": lambda count=5: drive_tools.list_recent_files(count),
+        "list_recent_files": lambda count=None: drive_tools.list_recent_files(count if count is not None else 5),
     }

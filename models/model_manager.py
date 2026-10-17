@@ -6,6 +6,7 @@ import config
 from models.claude_client import ClaudeClient
 from models.gemini_client import GeminiClient
 from models.openai_client import LocalClient, OpenAIClient
+from models.ollama_manager_client import OllamaManagerClient
 
 
 class ModelManager:
@@ -15,6 +16,7 @@ class ModelManager:
             "openai": OpenAIClient(),
             "gemini": GeminiClient(),
             "local": LocalClient(),
+            "ollama_manager": OllamaManagerClient(model_manager=self),
         }
 
     def get_client(self, name: str):
@@ -30,7 +32,7 @@ class ModelManager:
         """
         order = []
         if requested:
-            key = config.MODEL_ALIASES.get(requested.strip().lower())
+            key = config.MODEL_ALIASES.get(requested.strip().lower(), requested.strip().lower())
             if key:
                 order.append(key)
         order += [k for k in config.MODEL_PRIORITY if k not in order]

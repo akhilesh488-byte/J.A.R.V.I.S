@@ -16,6 +16,7 @@ Architecture:
 import datetime
 import logging
 import os
+import queue
 import re
 import signal
 import subprocess
@@ -151,6 +152,9 @@ class VoiceSynthesizer:
         self.tts = None
         self.device = "cuda"
         self._lock = threading.Lock()
+        self._playback_queue = queue.Queue()
+        self._worker_thread = None
+        self._ensure_playback_worker()
         self._init_xtts()
 
     def _init_xtts(self) -> None:
@@ -165,6 +169,35 @@ class VoiceSynthesizer:
         except Exception as e:
             log_status(f"XTTS v2 warning ({e}). Windows system voice will serve as fallback.")
             self.tts = None
+
+    def _ensure_playback_worker(self) -> None:
+        if self._worker_thread is None or not self._worker_thread.is_alive():
+            self._worker_thread = threading.Thread(
+                target=self._playback_worker,
+                daemon=True,
+                name="AudioPlaybackWorker",
+            )
+            self._worker_thread.start()
+
+    def _playback_worker(self) -> None:
+        """Continuously reads generated audio chunks from queue and plays sequentially."""
+        while True:
+            chunk_path = self._playback_queue.get()
+            if chunk_path is None:
+                self._playback_queue.task_done()
+                continue
+            try:
+                if os.path.exists(chunk_path):
+                    self._play_audio_file(chunk_path)
+            except Exception as e:
+                log_status(f"Playback error on {chunk_path}: {e}")
+            finally:
+                try:
+                    if os.path.exists(chunk_path):
+                        os.remove(chunk_path)
+                except Exception:
+                    pass
+                self._playback_queue.task_done()
 
     def _speak_system_fallback(self, text: str) -> None:
         """Fallback to Windows SAPI5 via PowerShell."""
@@ -196,7 +229,7 @@ class VoiceSynthesizer:
             log_status(f"Playback error: {e}")
 
     def speak(self, text: str) -> None:
-        """Synthesize text using single reference audio clip and stable baseline parameters."""
+        """Synthesize text using asynchronous sentence-level streaming playback."""
         clean_prompt = clean_text_for_tts(text)
         if not clean_prompt:
             return
@@ -206,22 +239,33 @@ class VoiceSynthesizer:
             speaker_ref = self.reference_wav if os.path.exists(self.reference_wav) else "jarvis_sample.wav"
             if self.tts and os.path.exists(speaker_ref):
                 try:
-                    tts_speed = float(os.environ.get("JARVIS_TTS_SPEED", "1.15"))
-                    self.tts.tts_to_file(
-                        text=clean_prompt,
-                        speaker_wav=speaker_ref,
-                        language="en",
-                        file_path=self.output_wav,
-                        gpt_cond_len=6.0,
-                        temperature=0.65,
-                        repetition_penalty=2.5,
-                        speed=tts_speed,
-                        enable_text_splitting=True,
-                    )
-                    self._play_audio_file(self.output_wav)
+                    sentences = [s.strip() for s in re.split(r'(?<=[.!?]) +', clean_prompt) if s.strip()]
+                    if not sentences:
+                        sentences = [clean_prompt]
+
+                    self._ensure_playback_worker()
+
+                    tts_speed = float(os.environ.get("JARVIS_TTS_SPEED", "1.05"))
+                    for i, sentence in enumerate(sentences):
+                        temp_chunk = os.path.join(tempfile.gettempdir(), f"jarvis_chunk_{int(time.time()*1000)}_{i}.wav")
+                        self.tts.tts_to_file(
+                            text=sentence,
+                            speaker_wav=speaker_ref,
+                            language="en",
+                            file_path=temp_chunk,
+                            gpt_cond_len=6.0,
+                            temperature=0.2,
+                            repetition_penalty=1.8,
+                            speed=tts_speed,
+                            enable_text_splitting=False,
+                        )
+                        self._playback_queue.put(temp_chunk)
+
+                    # Wait for all queued audio chunks to complete playback before returning
+                    self._playback_queue.join()
                     return
                 except Exception as e:
-                    log_status(f"XTTS synthesis error: {e}. Falling back to system voice.")
+                    log_status(f"XTTS streaming synthesis error: {e}. Falling back to system voice.")
 
             # Fallback path
             self._speak_system_fallback(clean_prompt)
@@ -447,11 +491,9 @@ class JarvisPersonalityRouter:
             log_status("Executing: Hardware Telemetry Readout")
             data = get_system_telemetry()
             telemetry_speech = (
-                f"Hardware telemetry report, sir. CPU load is at {data['cpu_load']} percent. "
-                f"Memory utilization is at {data['mem_percent']} percent. "
-                f"GPU is running at {data['gpu_temp']} degrees Celsius. "
-                f"Current power profile is set to {data['power_mode']} mode. "
-                f"All thermal parameters are nominal, sir."
+                f"Hardware telemetry report, sir. "
+                f"CPU at {data['cpu_load']} percent, RAM at {data['mem_percent']} percent, GPU at {data['gpu_temp']} degrees Celsius. "
+                f"Power profile is set to {data['power_mode']} mode. All thermal parameters are nominal, sir."
             )
             speak(telemetry_speech)
             return True
