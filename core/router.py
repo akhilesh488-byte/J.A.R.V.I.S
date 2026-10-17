@@ -121,7 +121,8 @@ class CommandRoutingResult(dict):
 def route(text, model_manager, dispatch_table, force_llm=False, capture_screen=True,
           image_path=None, requested_model=None) -> RouteResult:
     """
-    force_llm=True skips the regex step (the always-LLM baseline).
+    Routes commands directly to an LLM by default (force_llm=True),
+    bypassing the regex classification step.
     capture_screen=False stops the router from grabbing the live screen
     (benchmarks pass fixed screenshots through image_path instead).
     """
@@ -185,53 +186,11 @@ def handle_command(text: str, model_manager, speak_fn) -> str:
 def route_command(text: str, provider: str = "auto", use_mock: bool = False) -> CommandRoutingResult:
     """
     Headless command routing for production and benchmarks.
-    1. Classifies with regex. If matched, executes deterministic tool immediately (0 LLM latency).
-    2. If no regex match, dispatches to OllamaManagerClient or configured model_manager provider.
+    Directly routes all incoming commands to OllamaManagerClient (or configured provider),
+    completely bypassing the regex classifier.
     """
     t_start = time.perf_counter()
     timestamp = datetime.now().isoformat()
-
-    decision = classify_regex(text)
-    if decision is not None:
-        tool_name, tool_args = decision
-        t_tool_0 = time.perf_counter()
-        if use_mock:
-            mock = MockTools()
-            dispatch = mock.table()
-        else:
-            dispatch = build_dispatch_table(speak_fn=None)
-
-        err = None
-        try:
-            reply = str(dispatch[tool_name](**tool_args))
-        except Exception as ex:
-            reply = f"Error executing {tool_name}: {ex}"
-            err = str(ex)
-
-        tool_ms = (time.perf_counter() - t_tool_0) * 1000.0
-        total_ms = (time.perf_counter() - t_start) * 1000.0
-
-        return CommandRoutingResult({
-            "timestamp": timestamp,
-            "text": text,
-            "reply": reply,
-            "regex_matched": True,
-            "provider": "regex",
-            "model": "regex",
-            "total_ms": round(total_ms, 2),
-            "llm_ms": 0.0,
-            "tool_ms": round(tool_ms, 2),
-            "tokens_in": 0,
-            "tokens_out": 0,
-            "tool_called": tool_name,
-            "args": tool_args,
-            "valid_json": True,
-            "exact_match": True,
-            "error": err,
-            "escalated": False,
-        })
-
-    # Regex did not match: dispatch to LLM
     prov_lower = provider.strip().lower() if provider else "auto"
 
     if prov_lower in ("auto", "ollama", "local", "ollama_manager"):

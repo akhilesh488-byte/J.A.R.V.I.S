@@ -386,14 +386,36 @@ class OllamaManagerClientTests(unittest.TestCase):
 class RouteCommandTests(unittest.TestCase):
     """Tests headless route_command function."""
 
-    def test_route_command_regex_match(self):
+    @patch("urllib.request.urlopen")
+    def test_route_command_direct_ollama_tool_dispatch(self, mock_urlopen):
+        resp1 = MagicMock()
+        resp1.read.return_value = json.dumps({
+            "model": "jarvis-3b",
+            "message": {"role": "assistant", "content": '{"tool": "open_app", "args": {"app_name": "spotify"}}'},
+            "prompt_eval_count": 20,
+            "eval_count": 10,
+        }).encode("utf-8")
+        resp1.__enter__.return_value = resp1
+        resp1.__exit__.return_value = None
+
+        resp2 = MagicMock()
+        resp2.read.return_value = json.dumps({
+            "model": "jarvis-3b",
+            "message": {"role": "assistant", "content": "Opened spotify."},
+            "prompt_eval_count": 40,
+            "eval_count": 5,
+        }).encode("utf-8")
+        resp2.__enter__.return_value = resp2
+        resp2.__exit__.return_value = None
+
+        mock_urlopen.side_effect = [resp1, resp2]
+
         res = route_command("open spotify", use_mock=True)
-        self.assertTrue(res.regex_matched)
-        self.assertEqual(res.provider, "regex")
+        self.assertFalse(res.regex_matched)
+        self.assertEqual(res.provider, "ollama")
         self.assertEqual(res.tool_called, "open_app")
         self.assertEqual(res.args, {"app_name": "spotify"})
-        self.assertEqual(res.llm_ms, 0.0)
-        self.assertIn("Opened spotify", res.reply)
+        self.assertEqual(res.reply, "Opened spotify.")
 
     @patch("urllib.request.urlopen")
     def test_route_command_llm_dispatch(self, mock_urlopen):
