@@ -25,7 +25,7 @@ config.BENCHMARK_MODE = True
 config.LLM_TEMPERATURE = 0.0
 
 from bench.scoring import score_call  # noqa: E402
-from core.router import classify_regex, route  # noqa: E402
+from core.router import route  # noqa: E402
 from models.model_manager import ModelManager  # noqa: E402
 from tools.tool_registry import build_mock  # noqa: E402
 
@@ -63,12 +63,9 @@ def main():
     have_llm = bool(mm.candidates(None))
     before = snapshot()
 
-    print("Regex decisions (no model needed):")
+    print("Direct LLM routing (all commands to LLM):")
     for c in commands:
-        d = classify_regex(c["text"])
-        got = "regex" if d else "llm"
-        flag = "" if got == c["expected_path"] else "   <-- differs from expected_path"
-        print(f"  {c['id']:4} {c['text'][:44]:44} -> {d[0] if d else '-':14} {flag}")
+        print(f"  {c['id']:4} {c['text'][:44]:44} -> llm")
 
     rows = []
     for strategy in ("hybrid", "always_llm"):

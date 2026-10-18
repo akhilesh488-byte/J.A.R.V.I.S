@@ -1,0 +1,17 @@
+open_app(app_name: str) - Open an application
+manage_browser(action: str, query: str = None) - Manage browser actions, searching, or opening URLs
+play_pause_media() - Toggle media playback
+close_current_app(window_title: str = None) - Close active application
+get_window_status() - Get active window and open applications
+send_whatsapp_message(recipient: str, message: str) - Send a WhatsApp message
+add_todo(task: str) - Add a task to to-do list
+list_todos() - List current to-do items
+complete_todo(task_hint: str) - Mark to-do item as done
+set_timer(seconds: int, label: str = None) - Set a countdown timer
+set_alarm_at(hour: int, minute: int, label: str = None) - Set an alarm
+list_recent_emails(count: int = None) - List recent emails
+create_email_draft(to: str, subject: str, body: str) - Create email draft
+list_upcoming_events(count: int = None) - List calendar events
+create_event(summary: str, start_time: str, end_time: str, description: str = None) - Create calendar event
+list_recent_files(count: int = None) - List recent files
+remember_note(note: str) - Remember a note

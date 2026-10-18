@@ -109,9 +109,11 @@ class TestJarvisEnhancedFeatures(unittest.TestCase):
         self.assertTrue(any("Today is" in s for s in self.spoken))
 
     def test_unknown_command(self):
-        handled = JarvisPersonalityRouter.execute("make me a pizza")
-        self.assertFalse(handled)
-        self.assertTrue(any("Command unrecognized, sir. Standing by." in s for s in self.spoken))
+        from unittest.mock import patch
+        with patch("models.ollama_manager_client.OllamaManagerClient.is_available", return_value=False):
+            handled = JarvisPersonalityRouter.execute("make me a pizza")
+            self.assertFalse(handled)
+            self.assertTrue(any("Command unrecognized, sir. Standing by." in s for s in self.spoken))
 
 
 if __name__ == "__main__":

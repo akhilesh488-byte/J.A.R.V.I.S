@@ -17,10 +17,11 @@ from audio.vad import EnergyEndpointer, rms  # noqa: E402
 from bench.logger import REQUIRED_COLUMNS, log_experiment_run  # noqa: E402
 from bench.scoring import score_call  # noqa: E402
 from core import memory  # noqa: E402
-from core.router import classify_regex, route, route_command  # noqa: E402
+from core.router import route, route_command  # noqa: E402
 from models.base import ModelClient, new_stats  # noqa: E402
 from models.ollama_manager_client import OllamaManagerClient  # noqa: E402
 from tools.mock_tools import MockTools, ToolCallRecord  # noqa: E402
+from tools.system_tools import open_app  # noqa: E402
 from tools.tool_registry import build_mock, get_tool_schemas, validate_tool_call  # noqa: E402
 
 
@@ -47,42 +48,43 @@ class FakeManager:
         return [self.client] if self.client else []
 
 
-class RegexTests(unittest.TestCase):
-    def test_simple_patterns(self):
-        self.assertEqual(classify_regex("open spotify"), ("open_app", {"app_name": "spotify"}))
-        self.assertEqual(classify_regex("what's on my to-do list")[0], "list_todos")
-        self.assertEqual(classify_regex("add buy groceries to my todo list"),
-                         ("add_todo", {"task": "buy groceries"}))
-        self.assertEqual(classify_regex("add task call mom"), ("add_todo", {"task": "call mom"}))
-        self.assertEqual(classify_regex("mark buy groceries as done"),
-                         ("complete_todo", {"task_hint": "buy groceries"}))
+class DirectRoutingAndSystemToolsTests(unittest.TestCase):
+    def test_open_app_unknown_app_returns_error(self):
+        self.assertEqual(open_app("your door"), "App not found on system.")
+        self.assertEqual(open_app("nonexistent_unknown_app_123"), "App not found on system.")
 
-    def test_no_match(self):
-        self.assertIsNone(classify_regex("what is the capital of France"))
+    def test_direct_routing_no_regex_interception(self):
+        mock = build_mock()
+        # Without regex interception, an unconfigured manager cannot fulfill "open spotify" locally
+        res = route("open spotify", FakeManager(None), mock.table(), capture_screen=False)
+        self.assertEqual(res.error, "no_model")
+        self.assertEqual(len(mock.calls), 0)
 
-    def test_known_false_positive_is_kept_for_the_paper(self):
-        self.assertEqual(classify_regex("what is an open question")[0], "open_app")
+    def test_v2_system_tools_string_formats(self):
+        from tools.system_tools import (
+            manage_browser,
+            play_pause_media,
+            close_current_app,
+            get_window_status,
+        )
 
-    def test_timer_regex_off_by_default_then_on(self):
-        self.assertIsNone(classify_regex("set a timer for 5 minutes"))
-        config.ENABLE_TIMER_REGEX = True
-        try:
-            self.assertEqual(classify_regex("set a timer for 5 minutes"), ("set_timer", {"seconds": 300}))
-        finally:
-            config.ENABLE_TIMER_REGEX = False
+        self.assertEqual(manage_browser("search", "python"), "Searching for python.")
+        self.assertEqual(manage_browser("new_tab"), "Browser action done: new_tab.")
+        self.assertEqual(manage_browser("close_tab"), "Browser action done: close_tab.")
+        self.assertEqual(manage_browser("open_url", "https://google.com"), "Opened https://google.com.")
+        self.assertEqual(play_pause_media(), "Toggled media playback.")
+        self.assertEqual(close_current_app("Spotify"), "Closed Spotify.")
+        self.assertEqual(
+            get_window_status(title="Chrome", apps=["Chrome", "VS Code"]),
+            "Active window: Chrome. Open apps: Chrome, VS Code",
+        )
+
 
 
 class RouteTests(unittest.TestCase):
-    def test_regex_path_goes_through_mock(self):
+    def test_direct_llm_path_and_stats(self):
         mock = build_mock()
-        res = route("open spotify", FakeManager(None), mock.table(), capture_screen=False)
-        self.assertEqual(res.path, "regex")
-        self.assertEqual([c["tool"] for c in mock.calls], ["open_app"])
-
-    def test_force_llm_skips_regex_and_returns_stats(self):
-        mock = build_mock()
-        res = route("open spotify", FakeManager(FakeClient()), mock.table(),
-                    force_llm=True, capture_screen=False)
+        res = route("open spotify", FakeManager(FakeClient()), mock.table(), capture_screen=False)
         self.assertEqual(res.path, "llm")
         self.assertEqual(res.stats["iterations"], 2)
         self.assertEqual(mock.calls[0]["args"], {"task": "from llm"})
@@ -381,6 +383,146 @@ class OllamaManagerClientTests(unittest.TestCase):
         self.assertTrue(res["valid_json"])
         self.assertIn("Unknown tool", res["error"])
         self.assertFalse(res["escalated"])
+
+    @patch("urllib.request.urlopen")
+    def test_selective_memory_excludes_json_and_tool_result(self, mock_urlopen):
+        resp1 = self._make_http_response('{"tool": "open_app", "args": {"app_name": "spotify"}}')
+        resp2 = self._make_http_response("I have opened Spotify for you, sir.")
+        mock_urlopen.side_effect = [resp1, resp2]
+
+        client = OllamaManagerClient(model="jarvis-3b")
+        client.clear_history()
+
+        res1 = client.ask("open spotify", force_mock=True)
+        self.assertEqual(res1["reply"], "I have opened Spotify for you, sir.")
+
+        # Selective Memory Rule: Only user conversational text and final reply are appended
+        self.assertEqual(len(client.chat_history), 2)
+        self.assertEqual(client.chat_history[0], {"role": "user", "content": "open spotify"})
+        self.assertEqual(client.chat_history[1], {"role": "assistant", "content": "I have opened Spotify for you, sir."})
+
+        # Ensure no JSON or TOOL_RESULT in history
+        for turn in client.chat_history:
+            self.assertFalse(turn["content"].startswith("{"))
+            self.assertFalse(turn["content"].startswith("TOOL_RESULT:"))
+
+        # Second turn: verify history is passed to /api/chat payload
+        resp3 = self._make_http_response("You are welcome, sir.")
+        mock_urlopen.side_effect = [resp3]
+
+        res2 = client.ask("thank you", force_mock=True)
+        self.assertEqual(res2["reply"], "You are welcome, sir.")
+
+        # Check last urlopen call payload
+        last_call_args = mock_urlopen.call_args[0]
+        req = last_call_args[0]
+        payload = json.loads(req.data.decode("utf-8"))
+        sent_messages = payload["messages"]
+
+        self.assertEqual(sent_messages[0]["role"], "system")
+        self.assertEqual(sent_messages[1], {"role": "user", "content": "open spotify"})
+        self.assertEqual(sent_messages[2], {"role": "assistant", "content": "I have opened Spotify for you, sir."})
+        self.assertEqual(sent_messages[3], {"role": "user", "content": "thank you"})
+
+    def test_remember_note_permanent_prompt_injection(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_notes_file = os.path.join(tmpdir, "notes.md")
+            orig_notes_file = config.NOTES_FILE
+            orig_bench = config.BENCHMARK_MODE
+            orig_mem = config.USE_MEMORY
+            try:
+                config.NOTES_FILE = test_notes_file
+                config.BENCHMARK_MODE = False
+                config.USE_MEMORY = True
+
+                # Use memory.append_note to record a fact
+                memory.append_note("The user's name is Akhilesh")
+                self.assertTrue(os.path.exists(test_notes_file))
+                with open(test_notes_file, "r", encoding="utf-8") as f:
+                    content = f.read()
+                self.assertIn("The user's name is Akhilesh", content)
+
+                # Client build_system_prompt should permanently inject the note
+                client = OllamaManagerClient(model="jarvis-3b")
+                prompt = client._build_system_prompt()
+                self.assertIn("The user's name is Akhilesh", prompt)
+            finally:
+                config.NOTES_FILE = orig_notes_file
+                config.BENCHMARK_MODE = orig_bench
+                config.USE_MEMORY = orig_mem
+
+    def test_v2_persona_and_ambient_profile_injection(self):
+        from models.ollama_manager_client import USER_PROFILE_BLOCK
+        client = OllamaManagerClient(model="jarvis-3b")
+        prompt = client._build_system_prompt()
+        self.assertIn("About the user (ambient knowledge: use it naturally, never recite it unprompted):", prompt)
+        self.assertIn("Akhilesh Masali", prompt)
+        self.assertIn("PDA College of Engineering", prompt)
+        self.assertIn("Bajaj Pulsar N160", prompt)
+        self.assertNotIn("{PROFILE}", prompt)
+
+
+    @patch("urllib.request.urlopen")
+    def test_whatsapp_safety_gate_blocked_without_confirmation(self, mock_urlopen):
+        resp = self._make_http_response('{"tool": "send_whatsapp_message", "args": {"recipient": "Alice", "message": "hello"}}')
+        mock_urlopen.side_effect = [resp]
+
+        client = OllamaManagerClient(model="jarvis-3b")
+        client.clear_history()
+
+        executed = []
+        dispatch = {"send_whatsapp_message": lambda **kw: executed.append(kw) or "Sent"}
+
+        # Empty history -> must be blocked
+        res = client.ask("send message to alice", dispatch_table=dispatch)
+        self.assertEqual(len(executed), 0)
+        self.assertEqual(res["tool_called"], "send_whatsapp_message")
+        self.assertIn("Error: User confirmation required before sending WhatsApp messages.", res["reply"])
+
+        # History without 'Shall I send' or 'To whom' -> must be blocked
+        client.chat_history = [
+            {"role": "user", "content": "send whatsapp to alice"},
+            {"role": "assistant", "content": "I am preparing the message now."},
+        ]
+        mock_urlopen.side_effect = [resp]
+        res2 = client.ask("okay", dispatch_table=dispatch)
+        self.assertEqual(len(executed), 0)
+        self.assertIn("Error: User confirmation required before sending WhatsApp messages.", res2["reply"])
+
+    @patch("urllib.request.urlopen")
+    def test_whatsapp_safety_gate_allowed_with_confirmation(self, mock_urlopen):
+        resp1 = self._make_http_response('{"tool": "send_whatsapp_message", "args": {"recipient": "Alice", "message": "hello"}}')
+        resp2 = self._make_http_response("I have sent the message to Alice.")
+        mock_urlopen.side_effect = [resp1, resp2]
+
+        client = OllamaManagerClient(model="jarvis-3b")
+        client.chat_history = [
+            {"role": "user", "content": "message alice"},
+            {"role": "assistant", "content": "Shall I send 'hello' to Alice?"},
+        ]
+
+        executed = []
+        dispatch = {"send_whatsapp_message": lambda **kw: executed.append(kw) or "Message sent successfully."}
+
+        res = client.ask("yes, send it", dispatch_table=dispatch)
+        self.assertEqual(len(executed), 1)
+        self.assertEqual(executed[0], {"recipient": "Alice", "message": "hello"})
+        self.assertEqual(res["reply"], "I have sent the message to Alice.")
+
+        # Test with 'To whom' in assistant's preceding message
+        resp3 = self._make_http_response('{"tool": "send_whatsapp_message", "args": {"recipient": "Bob", "message": "hi"}}')
+        resp4 = self._make_http_response("Sent to Bob.")
+        mock_urlopen.side_effect = [resp3, resp4]
+
+        client.chat_history = [
+            {"role": "user", "content": "send message"},
+            {"role": "assistant", "content": "To whom should I send the WhatsApp message?"},
+        ]
+        res2 = client.ask("Bob, say hi", dispatch_table=dispatch)
+        self.assertEqual(len(executed), 2)
+        self.assertEqual(executed[1], {"recipient": "Bob", "message": "hi"})
+        self.assertEqual(res2["reply"], "Sent to Bob.")
+
 
 
 class RouteCommandTests(unittest.TestCase):
