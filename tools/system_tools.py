@@ -102,7 +102,8 @@ def take_screenshot(save_path: str = None) -> str:
 
 def manage_browser(action: str, query: Optional[str] = None, **kwargs) -> str:
     """
-    Manage browser actions, searching, or opening URLs.
+    Manage browser actions, searching, or opening URLs with state awareness.
+    Checks for an active/open browser window using pygetwindow before sending hotkeys.
     """
     if query is None:
         query = kwargs.get("url") or kwargs.get("search_query") or ""
@@ -128,6 +129,37 @@ def manage_browser(action: str, query: Optional[str] = None, **kwargs) -> str:
             pass
         return f"Opened {query}."
     else:
+        # Search for an active or open browser window
+        browser_win = None
+        try:
+            import pygetwindow as gw
+            browser_names = ("chrome", "edge", "firefox", "brave")
+            active = gw.getActiveWindow()
+            if active and active.title and any(b in active.title.lower() for b in browser_names):
+                browser_win = active
+            else:
+                for w in gw.getAllWindows():
+                    if w.title and any(b in w.title.lower() for b in browser_names):
+                        browser_win = w
+                        break
+        except Exception:
+            pass
+
+        if not browser_win:
+            return "Error: No browser window is currently open."
+
+        # Bring window to foreground before sending hotkeys
+        try:
+            if getattr(browser_win, "isMinimized", False):
+                browser_win.restore()
+            else:
+                browser_win.activate()
+        except Exception:
+            try:
+                browser_win.restore()
+            except Exception:
+                pass
+
         try:
             import pyautogui
             if act_lower in ("new_tab", "new tab"):
@@ -143,14 +175,51 @@ def manage_browser(action: str, query: Optional[str] = None, **kwargs) -> str:
 
 def play_pause_media(**kwargs) -> str:
     """
-    Toggle media playback.
+    Toggle media playback state-awarely using Windows OS Media Control.
+    Checks actual system media session state via winsdk before sending commands.
     """
     try:
-        import pyautogui
-        pyautogui.press("playpause")
+        import asyncio
+        import winsdk.windows.media.control as wmc
+
+        async def _control_media_async() -> str:
+            mgr = await wmc.GlobalSystemMediaTransportControlsSessionManager.request_async()
+            session = mgr.get_current_session()
+            if session is None:
+                sessions = mgr.get_sessions()
+                if sessions:
+                    session = sessions[0]
+
+            if session is None:
+                return "Error: No active media session found to control."
+
+            info = session.get_playback_info()
+            status = info.playback_status if info else None
+
+            # PLAYING is 4 in GlobalSystemMediaTransportControlsSessionPlaybackStatus
+            if status == wmc.GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING:
+                try:
+                    await session.try_pause_async()
+                except Exception:
+                    pass
+                return "Paused active media."
+            else:
+                try:
+                    await session.try_play_async()
+                except Exception:
+                    pass
+                return "Resumed media playback."
+
+        try:
+            return asyncio.run(_control_media_async())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(_control_media_async())
+            finally:
+                loop.close()
     except Exception:
-        pass
-    return "Toggled media playback."
+        return "Error: No active media session found to control."
 
 
 def close_current_app(window_title: Optional[str] = None, **kwargs) -> str:

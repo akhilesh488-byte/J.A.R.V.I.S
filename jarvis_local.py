@@ -247,9 +247,12 @@ class VoiceSynthesizer:
 
                     tts_speed = float(os.environ.get("JARVIS_TTS_SPEED", "1.05"))
                     for i, sentence in enumerate(sentences):
+                        cleaned_sentence = clean_text_for_tts(sentence)
+                        if not cleaned_sentence:
+                            continue
                         temp_chunk = os.path.join(tempfile.gettempdir(), f"jarvis_chunk_{int(time.time()*1000)}_{i}.wav")
                         self.tts.tts_to_file(
-                            text=sentence,
+                            text=cleaned_sentence,
                             speaker_wav=speaker_ref,
                             language="en",
                             file_path=temp_chunk,

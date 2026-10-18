@@ -68,11 +68,48 @@ class DirectRoutingAndSystemToolsTests(unittest.TestCase):
             get_window_status,
         )
 
+        from unittest.mock import MagicMock, patch
+
         self.assertEqual(manage_browser("search", "python"), "Searching for python.")
-        self.assertEqual(manage_browser("new_tab"), "Browser action done: new_tab.")
-        self.assertEqual(manage_browser("close_tab"), "Browser action done: close_tab.")
         self.assertEqual(manage_browser("open_url", "https://google.com"), "Opened https://google.com.")
-        self.assertEqual(play_pause_media(), "Toggled media playback.")
+
+        # Test manage_browser when no browser window is open
+        with patch("pygetwindow.getActiveWindow", return_value=None), patch("pygetwindow.getAllWindows", return_value=[]):
+            self.assertEqual(manage_browser("new_tab"), "Error: No browser window is currently open.")
+            self.assertEqual(manage_browser("close_tab"), "Error: No browser window is currently open.")
+
+        # Test manage_browser when a browser window is open
+        mock_win = MagicMock(title="Google Chrome", isMinimized=False)
+        with patch("pygetwindow.getActiveWindow", return_value=mock_win), patch("pyautogui.hotkey"):
+            self.assertEqual(manage_browser("new_tab"), "Browser action done: new_tab.")
+            self.assertEqual(manage_browser("close_tab"), "Browser action done: close_tab.")
+            mock_win.activate.assert_called()
+
+        # Test play_pause_media when no media session exists
+        self.assertEqual(play_pause_media(), "Error: No active media session found to control.")
+
+        # Test play_pause_media when media is playing
+        mock_session_playing = MagicMock()
+        mock_session_playing.get_playback_info.return_value = MagicMock(playback_status=4)
+        mock_mgr_playing = MagicMock()
+        mock_mgr_playing.get_current_session.return_value = mock_session_playing
+        with patch("winsdk.windows.media.control.GlobalSystemMediaTransportControlsSessionManager.request_async") as mock_req:
+            async def _fake_req_playing():
+                return mock_mgr_playing
+            mock_req.return_value = _fake_req_playing()
+            self.assertEqual(play_pause_media(), "Paused active media.")
+
+        # Test play_pause_media when media is paused
+        mock_session_paused = MagicMock()
+        mock_session_paused.get_playback_info.return_value = MagicMock(playback_status=5)
+        mock_mgr_paused = MagicMock()
+        mock_mgr_paused.get_current_session.return_value = mock_session_paused
+        with patch("winsdk.windows.media.control.GlobalSystemMediaTransportControlsSessionManager.request_async") as mock_req:
+            async def _fake_req_paused():
+                return mock_mgr_paused
+            mock_req.return_value = _fake_req_paused()
+            self.assertEqual(play_pause_media(), "Resumed media playback.")
+
         self.assertEqual(close_current_app("Spotify"), "Closed Spotify.")
         self.assertEqual(
             get_window_status(title="Chrome", apps=["Chrome", "VS Code"]),

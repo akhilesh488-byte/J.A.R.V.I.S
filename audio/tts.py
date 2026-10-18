@@ -50,14 +50,28 @@ def _speak_local(text: str) -> None:
 
 def speak(text: str) -> None:
     """
-    Dispatches to ElevenLabs if configured (config.TTS_PROVIDER ==
-    "elevenlabs"), otherwise uses local pyttsx3. Same signature either
-    way, so main.py doesn't need to know which one is active.
+    Dispatches to ElevenLabs if configured (config.TTS_PROVIDER == "elevenlabs"),
+    Coqui XTTS v2 if configured (config.TTS_PROVIDER in ("xtts", "coqui")),
+    otherwise uses local pyttsx3. Same signature either way, so main.py
+    doesn't need to know which one is active.
     """
     if not text:
         return
     if config.TTS_PROVIDER == "elevenlabs":
         from audio import tts_elevenlabs
         tts_elevenlabs.speak(text)
+    elif config.TTS_PROVIDER in ("xtts", "coqui", "coqui_xtts"):
+        from audio.engines import xtts_engine
+        out_wav = xtts_engine.synthesize(text)
+        if out_wav and os.path.exists(out_wav):
+            if sys.platform == "win32":
+                import subprocess
+                safe_path = out_wav.replace("'", "''")
+                ps_cmd = f"(New-Object System.Media.SoundPlayer '{safe_path}').PlaySync()"
+                subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], check=True)
     else:
         _speak_local(text)
+
+
+from audio.engines.xtts_engine import clean_text_for_tts, synthesize, tts_to_file
+

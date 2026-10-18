@@ -9,3 +9,6 @@ mss
 plyer
 Pillow
 TTS torch
+winsdk
+pygetwindow
+pyautogui
