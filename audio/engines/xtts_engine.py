@@ -7,6 +7,7 @@ to prevent audio hallucination timeouts (long beep / stutter).
 from __future__ import annotations
 
 import os
+os.environ["COQUI_TOS_AGREED"] = "1"
 import re
 import sys
 import tempfile
@@ -39,6 +40,53 @@ def clean_text_for_tts(text: str) -> str:
     return cleaned
 
 
+
+def _patch_xtts_runtime():
+    try:
+        import soundfile as sf
+        import torch
+        import torchaudio
+        from transformers import GPT2LMHeadModel
+        from TTS.tts.layers.xtts.gpt_inference import GPT2InferenceModel
+
+        _orig_torchaudio_load = torchaudio.load
+        def _sf_load(uri, *args, **kwargs):
+            try:
+                return _orig_torchaudio_load(uri, *args, **kwargs)
+            except Exception:
+                data, sr = sf.read(uri)
+                tensor = torch.from_numpy(data).float()
+                if tensor.ndim == 1:
+                    tensor = tensor.unsqueeze(0)
+                else:
+                    tensor = tensor.t()
+                return tensor, sr
+        torchaudio.load = _sf_load
+
+        GPT2InferenceModel.can_generate = lambda self: True
+        GPT2InferenceModel.prepare_inputs_for_generation = GPT2LMHeadModel.prepare_inputs_for_generation
+        GPT2InferenceModel._validate_model_kwargs = lambda self, model_kwargs: None
+
+        _orig_fwd = GPT2InferenceModel.forward
+        def _patched_fwd(self, *args, **kwargs):
+            pkv = kwargs.get('past_key_values') or (args[1] if len(args) > 1 else None)
+            if isinstance(pkv, tuple) and not hasattr(pkv, 'get_seq_length'):
+                class PKVWrapper(tuple):
+                    def get_seq_length(self):
+                        return self[0][0].shape[-2]
+                pkv = PKVWrapper(pkv)
+                if 'past_key_values' in kwargs:
+                    kwargs['past_key_values'] = pkv
+                elif len(args) > 1:
+                    args = list(args)
+                    args[1] = pkv
+                    args = tuple(args)
+            return _orig_fwd(self, *args, **kwargs)
+        GPT2InferenceModel.forward = _patched_fwd
+    except Exception as e:
+        print(f"[JARVIS] Runtime patch notice: {e}")
+
+
 class XTTSEngine:
     name = "xtts"
 
@@ -53,9 +101,11 @@ class XTTSEngine:
             import torch
             from TTS.api import TTS
 
+            _patch_xtts_runtime()
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
             self.tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(self.device)
-        except Exception:
+        except Exception as e:
+            print(f"[JARVIS] XTTS Load Error: {e}")
             self.tts = None
 
     def is_available(self) -> bool:
@@ -75,7 +125,7 @@ class XTTSEngine:
         language: str = "en",
         temperature: float = 0.2,
         repetition_penalty: float = 1.8,
-        gpt_cond_len: float = 6.0,
+        gpt_cond_len: int = 6,
         speed: float = 1.05,
     ) -> str:
         """
@@ -105,7 +155,7 @@ class XTTSEngine:
                 speaker_wav=ref_wav,
                 language=language,
                 file_path=output_path,
-                gpt_cond_len=gpt_cond_len,
+                gpt_cond_len=int(gpt_cond_len),
                 temperature=temperature,
                 repetition_penalty=repetition_penalty,
                 speed=speed,
@@ -122,7 +172,7 @@ class XTTSEngine:
         language: str = "en",
         temperature: float = 0.2,
         repetition_penalty: float = 1.8,
-        gpt_cond_len: float = 6.0,
+        gpt_cond_len: int = 6,
         speed: float = 1.05,
         **kwargs,
     ) -> str:
@@ -133,7 +183,7 @@ class XTTSEngine:
             language=language,
             temperature=temperature,
             repetition_penalty=repetition_penalty,
-            gpt_cond_len=gpt_cond_len,
+            gpt_cond_len=int(gpt_cond_len),
             speed=speed,
         )
 

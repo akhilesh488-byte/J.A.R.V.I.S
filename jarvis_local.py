@@ -6,7 +6,7 @@ Architecture:
   1. Dynamic Time-Based Greetings (Morning / Afternoon / Evening system status)
   2. System Hardware Telemetry Diagnostics (CPU, RAM, GPU, Power Profile)
   3. "Introduce Yourself" Persona Module
-  4. Single-Sample XTTS v2 Voice Cloning (jarvis_sample.wav, gpt_cond_len=6.0, speed=1.0)
+  4. Single-Sample XTTS v2 Voice Cloning (jarvis_sample.wav, gpt_cond_len=6, speed=1.0)
   5. High-Accuracy Faster-Whisper Speech Recognition ("base.en", int8)
   6. Dual Activation: Picovoice Porcupine ("Jarvis") + Global Hotkey ('F2')
   7. Deterministic Task Execution (YouTube, Spotify, Google, Tasks, Dictation, Apps)
@@ -145,6 +145,53 @@ def clean_text_for_tts(text: str) -> str:
 # ---------------------------------------------------------------------------
 # 2. LOCAL XTTS V2 VOICE CLONING (CUDA / SAPI5 FALLBACK)
 # ---------------------------------------------------------------------------
+
+def _patch_xtts_runtime():
+    try:
+        import soundfile as sf
+        import torch
+        import torchaudio
+        from transformers import GPT2LMHeadModel
+        from TTS.tts.layers.xtts.gpt_inference import GPT2InferenceModel
+
+        _orig_torchaudio_load = torchaudio.load
+        def _sf_load(uri, *args, **kwargs):
+            try:
+                return _orig_torchaudio_load(uri, *args, **kwargs)
+            except Exception:
+                data, sr = sf.read(uri)
+                tensor = torch.from_numpy(data).float()
+                if tensor.ndim == 1:
+                    tensor = tensor.unsqueeze(0)
+                else:
+                    tensor = tensor.t()
+                return tensor, sr
+        torchaudio.load = _sf_load
+
+        GPT2InferenceModel.can_generate = lambda self: True
+        GPT2InferenceModel.prepare_inputs_for_generation = GPT2LMHeadModel.prepare_inputs_for_generation
+        GPT2InferenceModel._validate_model_kwargs = lambda self, model_kwargs: None
+
+        _orig_fwd = GPT2InferenceModel.forward
+        def _patched_fwd(self, *args, **kwargs):
+            pkv = kwargs.get('past_key_values') or (args[1] if len(args) > 1 else None)
+            if isinstance(pkv, tuple) and not hasattr(pkv, 'get_seq_length'):
+                class PKVWrapper(tuple):
+                    def get_seq_length(self):
+                        return self[0][0].shape[-2]
+                pkv = PKVWrapper(pkv)
+                if 'past_key_values' in kwargs:
+                    kwargs['past_key_values'] = pkv
+                elif len(args) > 1:
+                    args = list(args)
+                    args[1] = pkv
+                    args = tuple(args)
+            return _orig_fwd(self, *args, **kwargs)
+        GPT2InferenceModel.forward = _patched_fwd
+    except Exception as e:
+        print(f"[JARVIS] Runtime patch notice: {e}")
+
+
 class VoiceSynthesizer:
     def __init__(self, reference_wav: str = REFERENCE_WAV, output_wav: str = OUTPUT_WAV):
         self.reference_wav = reference_wav
@@ -162,11 +209,13 @@ class VoiceSynthesizer:
             import torch
             from TTS.api import TTS
 
+            _patch_xtts_runtime()
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
             log_status(f"Loading Coqui XTTS v2 on {self.device.upper()}...")
             self.tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(self.device)
             log_status("XTTS v2 voice cloning initialized.")
         except Exception as e:
+            print(f"[JARVIS] XTTS Load Error: {e}")
             log_status(f"XTTS v2 warning ({e}). Windows system voice will serve as fallback.")
             self.tts = None
 
@@ -236,7 +285,7 @@ class VoiceSynthesizer:
 
         with self._lock:
             display_dialogue("JARVIS", clean_prompt)
-            speaker_ref = self.reference_wav if os.path.exists(self.reference_wav) else "jarvis_sample.wav"
+            speaker_ref = self.reference_wav if (self.reference_wav and os.path.exists(self.reference_wav)) else os.path.join(ROOT, "jarvis_sample.wav")
             if self.tts and os.path.exists(speaker_ref):
                 try:
                     sentences = [s.strip() for s in re.split(r'(?<=[.!?]) +', clean_prompt) if s.strip()]
@@ -256,7 +305,7 @@ class VoiceSynthesizer:
                             speaker_wav=speaker_ref,
                             language="en",
                             file_path=temp_chunk,
-                            gpt_cond_len=6.0,
+                            gpt_cond_len=6,
                             temperature=0.2,
                             repetition_penalty=1.8,
                             speed=tts_speed,
@@ -297,9 +346,9 @@ class SpeechRecognizer:
                     from faster_whisper import WhisperModel
 
                     device = "cuda" if torch.cuda.is_available() else "cpu"
-                    log_status(f"Loading Faster-Whisper ('base.en', int8) on {device.upper()}...")
+                    log_status(f"Loading Faster-Whisper ('base.en', float16) on {device.upper()}...")
                     try:
-                        self._model = WhisperModel("base.en", device=device, compute_type="int8")
+                        self._model = WhisperModel("base.en", device=device, compute_type="float16")
                     except Exception as e:
                         log_status(f"CUDA STT hitch ({e}), falling back to CPU...")
                         self._model = WhisperModel("base.en", device="cpu", compute_type="int8")
@@ -911,7 +960,7 @@ def main():
     print("=" * 68)
     print(f"  Voice Reference : {REFERENCE_WAV}")
     print(f"  Voice Engine    : Coqui XTTS v2 (Single Reference, gpt_cond_len=6.0)")
-    print(f"  Speech Engine   : Faster-Whisper ('base.en', int8)")
+    print(f"  Speech Engine   : Faster-Whisper ('base.en', float16)")
     print(f"  Dual Activation : Porcupine ('jarvis') + Global F2 Hotkey")
     print(f"  Diagnostics     : Hardware Telemetry (CPU, RAM, GPU, Power)")
     print(f"  Personality     : Authentic Iron Man Jarvis Dialogue")

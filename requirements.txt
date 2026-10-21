@@ -8,7 +8,10 @@ onnxruntime
 mss
 plyer
 Pillow
-TTS torch
+TTS
+torch
 winsdk
 pygetwindow
 pyautogui
+psutil
+keyboard

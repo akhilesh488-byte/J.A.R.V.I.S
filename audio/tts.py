@@ -1,9 +1,13 @@
 import os
+os.environ["COQUI_TOS_AGREED"] = "1"
 import queue
 import sys
 import threading
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_SPEAKER_WAV = os.path.join(ROOT, "jarvis_sample.wav")
+
+sys.path.append(ROOT)
 import config
 
 # ---------------------------------------------------------------------------
@@ -61,14 +65,20 @@ def speak(text: str) -> None:
         from audio import tts_elevenlabs
         tts_elevenlabs.speak(text)
     elif config.TTS_PROVIDER in ("xtts", "coqui", "coqui_xtts"):
-        from audio.engines import xtts_engine
-        out_wav = xtts_engine.synthesize(text)
-        if out_wav and os.path.exists(out_wav):
-            if sys.platform == "win32":
-                import subprocess
-                safe_path = out_wav.replace("'", "''")
-                ps_cmd = f"(New-Object System.Media.SoundPlayer '{safe_path}').PlaySync()"
-                subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], check=True)
+        try:
+            from audio.engines import xtts_engine
+            out_wav = xtts_engine.synthesize(text, speaker_wav=DEFAULT_SPEAKER_WAV)
+            if out_wav and os.path.exists(out_wav):
+                if sys.platform == "win32":
+                    import subprocess
+                    safe_path = out_wav.replace("'", "''")
+                    ps_cmd = f"(New-Object System.Media.SoundPlayer '{safe_path}').PlaySync()"
+                    subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], check=True)
+            else:
+                _speak_local(text)
+        except Exception as e:
+            print(f"[JARVIS] XTTS Load Error: {e}")
+            _speak_local(text)
     else:
         _speak_local(text)
 
