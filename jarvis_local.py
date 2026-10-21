@@ -239,16 +239,39 @@ def sanitize_xtts_audio(wav_path: str, max_words: int | None = None) -> bool:
 
         last_audio_idx = len(data)
 
-        # 1. Backward scan: trim trailing dead silence after speech has ended
-        for i in range(n_wins - 1, -1, -1):
-            start = i * hop_len
-            chunk = data[start:start + win_len]
-            rms = np.sqrt(np.mean(chunk.astype(float) ** 2))
-            if rms > 450:
-                last_audio_idx = min(len(data), start + win_len + int(sr * 0.15))
-                break
+        # 1. Forward scan for short phrases: cut immediately after true speech cessation (prevents tail blips)
+        if max_words and max_words <= 5:
+            speech_started = False
+            silence_count = 0
+            needed_silence = int(0.20 / 0.02)  # 200ms silence
+            for i in range(n_wins):
+                start = i * hop_len
+                chunk = data[start:start + win_len]
+                rms = np.sqrt(np.mean(chunk.astype(float) ** 2))
+                if rms > 700:
+                    speech_started = True
+                    silence_count = 0
+                elif speech_started:
+                    if rms < 380:
+                        silence_count += 1
+                        if silence_count >= needed_silence:
+                            cutoff = start - (silence_count * hop_len) + int(sr * 0.08)
+                            last_audio_idx = min(last_audio_idx, max(int(sr * 0.4), cutoff))
+                            break
+                    else:
+                        silence_count = 0
 
-        # 2. Overrun protection: if file ran away far beyond expected word length,
+        # 2. Backward scan: trim trailing dead silence after speech has ended
+        if last_audio_idx == len(data):
+            for i in range(n_wins - 1, -1, -1):
+                start = i * hop_len
+                chunk = data[start:start + win_len]
+                rms = np.sqrt(np.mean(chunk.astype(float) ** 2))
+                if rms > 450:
+                    last_audio_idx = min(len(data), start + win_len + int(sr * 0.15))
+                    break
+
+        # 3. Overrun protection: if file ran away far beyond expected word length,
         # detect if a pure continuous tone (>35% energy in a single FFT bin) has taken over
         if dur_sec > expected_max_sec:
             for i in range(int(sr * 1.0) // hop_len, n_wins):
@@ -267,7 +290,7 @@ def sanitize_xtts_audio(wav_path: str, max_words: int | None = None) -> bool:
                 last_audio_idx = int(expected_max_sec * sr)
 
         # Preserve at least minimum speech samples
-        min_samples = int(sr * min(dur_sec, 0.8))
+        min_samples = int(sr * min(dur_sec, 0.45 if (max_words and max_words <= 3) else 0.8))
         last_audio_idx = max(last_audio_idx, min_samples)
 
         cleaned = data[:last_audio_idx].copy()
@@ -529,10 +552,21 @@ class SpeechRecognizer:
 
         try:
             model = self._get_model()
-            segments, _ = model.transcribe(wav_path, beam_size=5, language="en")
-            transcript = " ".join(seg.text for seg in segments).strip()
-            log_status(f'Transcribed: "{transcript}"')
-            return transcript
+            prompt = "Jarvis, WhatsApp, YouTube, Spotify, Chrome, Google, Notepad, Calculator, open, play, search, timer, todo"
+            segments, _ = model.transcribe(
+                wav_path,
+                beam_size=5,
+                language="en",
+                initial_prompt=prompt,
+                vad_filter=True,
+            )
+            raw_transcript = " ".join(seg.text for seg in segments).strip()
+            # Clean leading punctuation and common mishearings
+            cleaned = re.sub(r"^[,\s.\-]+", "", raw_transcript)
+            cleaned = re.sub(r"\b(orts\s*up|whats\s*up|what\s*app|whats\s*app)\b", "WhatsApp", cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r"\b(you\s*tube|u\s*tube)\b", "YouTube", cleaned, flags=re.IGNORECASE)
+            log_status(f'Transcribed: "{cleaned}"')
+            return cleaned
         except Exception as e:
             log_status(f"Transcription error: {e}")
             return ""
@@ -698,11 +732,11 @@ class JarvisPersonalityRouter:
             return True
 
         # -------------------------------------------------------------------
-        # 4. YOUTUBE PLAYBACK ("play [title] video on youtube" / "play [title] on youtube")
+        # 4. YOUTUBE PLAYBACK ("play [title] video on youtube" / "open youtube and play [title]" / "search youtube for [title]")
         # -------------------------------------------------------------------
-        yt_pattern = re.search(r"play\s+(.+?)(?:\s+video)?\s+on\s+youtube", text)
+        yt_pattern = re.search(r"(?:play\s+(.+?)(?:\s+video)?\s+on\s+youtube|open\s+youtube\s+and\s+play\s+(.+)|search\s+youtube\s+for\s+(.+)|youtube\s+search\s+(.+))", text)
         if yt_pattern:
-            raw_title = yt_pattern.group(1).strip()
+            raw_title = (yt_pattern.group(1) or yt_pattern.group(2) or yt_pattern.group(3) or yt_pattern.group(4)).strip()
             clean_title = re.sub(r"^(the|song|a)\s+", "", raw_title).strip()
             log_status(f"Initiating YouTube Playback: {clean_title}")
             speak(f"Searching YouTube and initiating playback for {clean_title.title()}, sir.")
@@ -772,19 +806,44 @@ class JarvisPersonalityRouter:
         # -------------------------------------------------------------------
         # 9. APPLICATION OPENING ("open [app name]")
         # -------------------------------------------------------------------
-        if "open notepad" in text:
+        if ("youtube" in text or "you tube" in text) and ("whatsapp" in text or "whats app" in text):
+            log_status("Launching YouTube and WhatsApp")
+            speak("Launching YouTube and WhatsApp now, sir.")
+            webbrowser.open("https://youtube.com")
+            try:
+                os.startfile("whatsapp:")
+            except Exception:
+                webbrowser.open("https://web.whatsapp.com")
+            return True
+
+        if any(w in text for w in ["open whatsapp", "open whats app", "open what's app", "whatsapp", "launch whatsapp"]):
+            log_status("Launching WhatsApp")
+            speak("Launching WhatsApp now, sir.")
+            try:
+                os.startfile("whatsapp:")
+            except Exception:
+                webbrowser.open("https://web.whatsapp.com")
+            return True
+
+        if any(w in text for w in ["open youtube", "open you tube", "open the youtube", "youtube", "launch youtube"]):
+            log_status("Launching YouTube")
+            speak("Launching YouTube now, sir.")
+            webbrowser.open("https://youtube.com")
+            return True
+
+        if any(w in text for w in ["open notepad", "notepad", "launch notepad"]):
             log_status("Launching Notepad")
             speak("Launching Notepad now, sir.")
             subprocess.Popen("notepad.exe")
             return True
 
-        if "open calculator" in text:
+        if any(w in text for w in ["open calculator", "calculator", "calc", "launch calculator"]):
             log_status("Launching Calculator")
             speak("Launching Calculator now, sir.")
             subprocess.Popen("calc.exe")
             return True
 
-        if "open spotify" in text:
+        if any(w in text for w in ["open spotify", "launch spotify", "spotify"]):
             log_status("Launching Spotify")
             speak("Launching Spotify now, sir.")
             try:
@@ -793,27 +852,31 @@ class JarvisPersonalityRouter:
                 webbrowser.open("https://open.spotify.com")
             return True
 
-        if "open chrome" in text or "open google chrome" in text:
+        if any(w in text for w in ["open chrome", "open google chrome", "open browser", "launch chrome", "chrome"]):
             log_status("Launching Chrome")
             speak("Launching Chrome now, sir.")
             webbrowser.open("https://google.com")
             return True
 
-        if "open youtube" in text:
-            log_status("Launching YouTube")
-            speak("Launching YouTube now, sir.")
-            webbrowser.open("https://youtube.com")
-            return True
-
-        general_open = re.search(r"open\s+([a-zA-Z0-9_\-\s]+)", text)
+        general_open = re.search(r"(?:open|launch)\s+([a-zA-Z0-9_\-\s]+)", text)
         if general_open:
             app_raw = general_open.group(1).strip()
-            log_status(f"Launching application: {app_raw}")
-            speak(f"Launching {app_raw.title()} now, sir.")
+            app_clean = re.sub(r"^(the|my|a)\s+", "", app_raw).strip()
+            log_status(f"Launching application: {app_clean}")
+            speak(f"Launching {app_clean.title()} now, sir.")
             try:
-                os.startfile(app_raw)
+                from tools.system_tools import open_app
+                res = open_app(app_clean)
+                if "not found" in res.lower():
+                    try:
+                        os.startfile(app_clean)
+                    except Exception:
+                        webbrowser.open(f"https://www.google.com/search?q={urllib.parse.quote(app_clean)}")
             except Exception:
-                subprocess.Popen(f'start "" {app_raw}', shell=True)
+                try:
+                    os.startfile(app_clean)
+                except Exception:
+                    webbrowser.open(f"https://www.google.com/search?q={urllib.parse.quote(app_clean)}")
             return True
 
         # -------------------------------------------------------------------

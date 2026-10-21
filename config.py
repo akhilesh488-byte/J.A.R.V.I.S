@@ -185,13 +185,16 @@ APP_ALIASES = {
     "google chrome": {"windows": "https://google.com", "linux": "google-chrome"},
     "firefox": {"windows": "firefox", "linux": "firefox"},
     "edge": {"windows": "microsoft-edge:", "linux": "microsoft-edge"},
-    # --- Popular websites (open in default browser) ---
+    # --- Popular websites & apps (open in default browser or desktop protocol) ---
     "youtube": {"windows": "https://youtube.com", "linux": "xdg-open https://youtube.com"},
+    "you tube": {"windows": "https://youtube.com", "linux": "xdg-open https://youtube.com"},
+    "u tube": {"windows": "https://youtube.com", "linux": "xdg-open https://youtube.com"},
     "google": {"windows": "https://google.com", "linux": "xdg-open https://google.com"},
     "gmail": {"windows": "https://mail.google.com", "linux": "xdg-open https://mail.google.com"},
     "google maps": {"windows": "https://maps.google.com", "linux": "xdg-open https://maps.google.com"},
     "maps": {"windows": "https://maps.google.com", "linux": "xdg-open https://maps.google.com"},
-    "whatsapp": {"windows": "https://web.whatsapp.com", "linux": "xdg-open https://web.whatsapp.com"},
+    "whatsapp": {"windows": "whatsapp:", "linux": "xdg-open https://web.whatsapp.com"},
+    "whats app": {"windows": "whatsapp:", "linux": "xdg-open https://web.whatsapp.com"},
     "instagram": {"windows": "https://instagram.com", "linux": "xdg-open https://instagram.com"},
     "twitter": {"windows": "https://twitter.com", "linux": "xdg-open https://twitter.com"},
     "x": {"windows": "https://x.com", "linux": "xdg-open https://x.com"},

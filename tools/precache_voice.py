@@ -42,6 +42,8 @@ PHRASES = {
     "launching_notepad_now_sir": "Launching Notepad now, sir.",
     "launching_calculator_now_sir": "Launching Calculator now, sir.",
     "launching_youtube_now_sir": "Launching YouTube now, sir.",
+    "launching_whatsapp_now_sir": "Launching WhatsApp now, sir.",
+    "launching_youtube_and_whatsapp_now_sir": "Launching YouTube and WhatsApp now, sir.",
     "playback_stopped_sir": "Playback stopped, sir.",
     "next_track_engaged_sir": "Next track engaged, sir.",
     "dictation_mode_active_sir_please_speak_your_note_clearly": "Dictation mode active, sir. Please speak your note clearly.",
