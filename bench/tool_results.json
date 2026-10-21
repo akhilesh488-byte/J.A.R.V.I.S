@@ -1,0 +1,19 @@
+{
+  "open_app": "Opening {app_name}.",
+  "add_todo": "Added '{task}' to your to-do list.",
+  "list_todos": "1. [ ] Buy groceries\n2. [ ] Review project code",
+  "complete_todo": "Marked '{task_hint}' as completed.",
+  "set_timer": "Timer set for {seconds} seconds.",
+  "set_alarm_at": "Alarm set for {hour}:{minute}.",
+  "list_recent_emails": "1. Meeting update from Team\n2. Project status from Lead",
+  "create_email_draft": "Draft created for {to} with subject '{subject}'.",
+  "list_upcoming_events": "1. Sprint Planning at 10:00 AM\n2. Architecture Review at 3:00 PM",
+  "create_event": "Event '{summary}' scheduled from {start_time} to {end_time}.",
+  "list_recent_files": "1. main.py\n2. config.py\n3. notes.md",
+  "remember_note": "Noted: {note}",
+  "manage_browser": "Browser action done: {action}.",
+  "play_pause_media": "Toggled media playback.",
+  "close_current_app": "Closed active application.",
+  "get_window_status": "Active window: Chrome. Open apps: Chrome, VS Code",
+  "send_whatsapp_message": "WhatsApp message sent to {recipient}: '{message}'."
+}
