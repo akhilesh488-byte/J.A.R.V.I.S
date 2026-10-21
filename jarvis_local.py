@@ -143,8 +143,129 @@ def clean_text_for_tts(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 2. LOCAL XTTS V2 VOICE CLONING (CUDA / SAPI5 FALLBACK)
+# 2. LOCAL XTTS V2 VOICE CLONING (PROMPT CACHING & ANTI-HALLUCINATION)
 # ---------------------------------------------------------------------------
+VOICE_CACHE_DIR = os.path.join(ROOT, "jarvis_voice_cache")
+os.makedirs(VOICE_CACHE_DIR, exist_ok=True)
+
+
+def _cache_key(text: str) -> str:
+    """Normalize text into a filesystem-safe cache key."""
+    cleaned = re.sub(r"[^\w\s]", "", text.lower()).strip()
+    return re.sub(r"\s+", "_", cleaned)
+
+
+CACHE_ALIASES = {
+    "yes_sir": "yes_sir",
+    "yessir": "yes_sir",
+    "command_unrecognized_sir_standing_by": "command_unrecognized_sir_standing_by",
+    "command_unrecognized_sir": "command_unrecognized_sir_standing_by",
+    "noted_sir": "noted_sir",
+    "on_its_way_sir": "on_its_way_sir",
+    "standing_by": "standing_by",
+    "good_morning_sir": "good_morning_sir",
+    "good_afternoon_sir": "good_afternoon_sir",
+    "good_evening_sir": "good_evening_sir",
+    "launching_spotify_now_sir": "launching_spotify_now_sir",
+    "launching_chrome_now_sir": "launching_chrome_now_sir",
+    "launching_notepad_now_sir": "launching_notepad_now_sir",
+    "launching_calculator_now_sir": "launching_calculator_now_sir",
+    "launching_youtube_now_sir": "launching_youtube_now_sir",
+    "powering_down_systems_good_day_sir": "powering_down_systems_good_day_sir",
+}
+
+
+def get_cached_audio(text: str) -> str | None:
+    key = _cache_key(text)
+    target_key = CACHE_ALIASES.get(key, key)
+    path = os.path.join(VOICE_CACHE_DIR, f"{target_key}.wav")
+    if os.path.exists(path):
+        return path
+    return None
+
+
+def sanitize_xtts_audio(wav_path: str, max_words: int | None = None) -> bool:
+    """
+    Cleans synthesized audio without truncating normal speech:
+      1. Trims trailing dead silence / carrier hum at the end of speech.
+      2. If the model experiences a runaway generation (overrun beyond expected duration),
+         detects where speech transitioned into a pure monotone hallucination (e.g. 750Hz beep)
+         and cleanly truncates the tone tail.
+      3. Applies a smooth 30ms cosine fade-out at the end.
+    """
+    try:
+        import numpy as np
+
+        with wave.open(wav_path, "rb") as w:
+            sr = w.getframerate()
+            n_channels = w.getnchannels()
+            sampwidth = w.getsampwidth()
+            n_frames = w.getnframes()
+            data = np.frombuffer(w.readframes(n_frames), dtype=np.int16)
+
+        if len(data) == 0:
+            return False
+
+        dur_sec = len(data) / sr
+        expected_max_sec = max(3.0, (max_words or 10) * 0.75 + 1.8) if max_words else 15.0
+
+        win_len = int(sr * 0.04)  # 40ms window
+        hop_len = int(sr * 0.02)  # 20ms hop
+        n_wins = (len(data) - win_len) // hop_len
+
+        last_audio_idx = len(data)
+
+        # 1. Backward scan: trim trailing dead silence after speech
+        for i in range(n_wins - 1, -1, -1):
+            start = i * hop_len
+            chunk = data[start:start + win_len]
+            rms = np.sqrt(np.mean(chunk.astype(float) ** 2))
+            if rms > 450:
+                last_audio_idx = min(len(data), start + win_len + int(sr * 0.15))
+                break
+
+        # 2. Overrun protection: if file ran away far beyond expected word length,
+        # detect if a pure continuous tone (XTTS 750Hz beep hallucination) has taken over
+        if dur_sec > expected_max_sec:
+            for i in range(int(sr * 1.0) // hop_len, n_wins):
+                start = i * hop_len
+                chunk = data[start:start + win_len]
+                fft = np.abs(np.fft.rfft(chunk))
+                tot = np.sum(fft ** 2)
+                if tot > 0:
+                    peak_ratio = np.max(fft ** 2) / tot
+                    peak_freq = np.argmax(fft) * sr / (2 * len(fft))
+                    if peak_ratio > 0.35 and peak_freq > 300:
+                        last_audio_idx = min(last_audio_idx, max(int(sr * 1.0), start))
+                        break
+
+            if last_audio_idx == len(data):
+                last_audio_idx = int(expected_max_sec * sr)
+
+        # Preserve at least minimum speech samples
+        min_samples = int(sr * min(dur_sec, 0.8))
+        last_audio_idx = max(last_audio_idx, min_samples)
+
+        cleaned = data[:last_audio_idx].copy()
+
+        # Smooth 30ms fade-out to prevent audio pops
+        fade_len = min(int(sr * 0.03), len(cleaned))
+        if fade_len > 0:
+            fade = np.linspace(1.0, 0.0, fade_len)
+            cleaned[-fade_len:] = (cleaned[-fade_len:] * fade).astype(np.int16)
+
+        with wave.open(wav_path, "wb") as w:
+            w.setnchannels(n_channels)
+            w.setsampwidth(sampwidth)
+            w.setframerate(sr)
+            w.writeframes(cleaned.tobytes())
+
+        return True
+    except Exception as e:
+        log_status(f"Audio sanitizer warning: {e}")
+        return False
+
+
 class VoiceSynthesizer:
     def __init__(self, reference_wav: str = REFERENCE_WAV, output_wav: str = OUTPUT_WAV):
         self.reference_wav = reference_wav
@@ -154,6 +275,7 @@ class VoiceSynthesizer:
         self._lock = threading.Lock()
         self._playback_queue = queue.Queue()
         self._worker_thread = None
+        self.last_spoken = ""
         self._ensure_playback_worker()
         self._init_xtts()
 
@@ -182,21 +304,23 @@ class VoiceSynthesizer:
     def _playback_worker(self) -> None:
         """Continuously reads generated audio chunks from queue and plays sequentially."""
         while True:
-            chunk_path = self._playback_queue.get()
-            if chunk_path is None:
+            item = self._playback_queue.get()
+            if item is None:
                 self._playback_queue.task_done()
                 continue
+            chunk_path, is_temp = item if isinstance(item, tuple) else (item, True)
             try:
                 if os.path.exists(chunk_path):
                     self._play_audio_file(chunk_path)
             except Exception as e:
                 log_status(f"Playback error on {chunk_path}: {e}")
             finally:
-                try:
-                    if os.path.exists(chunk_path):
-                        os.remove(chunk_path)
-                except Exception:
-                    pass
+                if is_temp:
+                    try:
+                        if os.path.exists(chunk_path):
+                            os.remove(chunk_path)
+                    except Exception:
+                        pass
                 self._playback_queue.task_done()
 
     def _speak_system_fallback(self, text: str) -> None:
@@ -220,7 +344,15 @@ class VoiceSynthesizer:
                 log_status(f"TTS Fallback error: {e2}")
 
     def _play_audio_file(self, wav_path: str) -> None:
-        """Plays WAV output synchronously using PowerShell SoundPlayer."""
+        """Plays WAV output synchronously using native winsound (instant) or fallback."""
+        try:
+            if sys.platform == "win32":
+                import winsound
+                winsound.PlaySound(wav_path, winsound.SND_FILENAME)
+                return
+        except Exception:
+            pass
+
         try:
             safe_path = wav_path.replace("'", "''")
             ps_cmd = f"(New-Object System.Media.SoundPlayer '{safe_path}').PlaySync()"
@@ -229,13 +361,21 @@ class VoiceSynthesizer:
             log_status(f"Playback error: {e}")
 
     def speak(self, text: str) -> None:
-        """Synthesize text using asynchronous sentence-level streaming playback."""
+        """Synthesize text using prompt caching and streaming sentence playback."""
         clean_prompt = clean_text_for_tts(text)
         if not clean_prompt:
             return
 
         with self._lock:
+            self.last_spoken = clean_prompt
             display_dialogue("JARVIS", clean_prompt)
+
+            # 1. Whole-prompt instant cache check (0ms latency, zero hallucination)
+            cached_wav = get_cached_audio(clean_prompt)
+            if cached_wav and os.path.exists(cached_wav):
+                self._play_audio_file(cached_wav)
+                return
+
             speaker_ref = self.reference_wav if os.path.exists(self.reference_wav) else "jarvis_sample.wav"
             if self.tts and os.path.exists(speaker_ref):
                 try:
@@ -250,19 +390,26 @@ class VoiceSynthesizer:
                         cleaned_sentence = clean_text_for_tts(sentence)
                         if not cleaned_sentence:
                             continue
+
+                        # Sentence-level cache hit check
+                        cached_chunk = get_cached_audio(cleaned_sentence)
+                        if cached_chunk and os.path.exists(cached_chunk):
+                            self._playback_queue.put((cached_chunk, False))
+                            continue
+
                         temp_chunk = os.path.join(tempfile.gettempdir(), f"jarvis_chunk_{int(time.time()*1000)}_{i}.wav")
                         self.tts.tts_to_file(
                             text=cleaned_sentence,
                             speaker_wav=speaker_ref,
                             language="en",
                             file_path=temp_chunk,
-                            gpt_cond_len=6.0,
-                            temperature=0.2,
-                            repetition_penalty=1.8,
                             speed=tts_speed,
-                            enable_text_splitting=False,
                         )
-                        self._playback_queue.put(temp_chunk)
+
+                        # Sanitize synthesized audio to trim trailing silence & cut overrun tone if any
+                        sanitize_xtts_audio(temp_chunk, max_words=len(cleaned_sentence.split()))
+
+                        self._playback_queue.put((temp_chunk, True))
 
                     # Wait for all queued audio chunks to complete playback before returning
                     self._playback_queue.join()
@@ -631,9 +778,23 @@ class JarvisPersonalityRouter:
             webbrowser.open("https://youtube.com")
             return True
 
-        general_open = re.search(r"open\s+([a-zA-Z0-9_\-\s]+)", text)
+        # General app opening (strictly bounded to prevent capturing full sentences)
+        general_open = re.search(r"^\s*(?:please\s+)?(?:open|launch|start)\s+([a-zA-Z0-9_\-]{2,25}(?:\s+[a-zA-Z0-9_\-]{2,25})?)\s*$", text)
         if general_open:
             app_raw = general_open.group(1).strip()
+            app_clean = app_raw.lower()
+            if app_clean in ("terminal", "cmd", "command prompt"):
+                log_status("Launching Terminal")
+                speak("Launching Terminal now, sir.")
+                import shutil
+                subprocess.Popen("wt.exe" if shutil.which("wt.exe") else "cmd.exe")
+                return True
+            elif app_clean in ("code", "vscode", "vs code", "visual studio code"):
+                log_status("Launching VS Code")
+                speak("Launching Visual Studio Code now, sir.")
+                subprocess.Popen("code", shell=True)
+                return True
+
             log_status(f"Launching application: {app_raw}")
             speak(f"Launching {app_raw.title()} now, sir.")
             try:
@@ -682,6 +843,65 @@ class JarvisPersonalityRouter:
         return False
 
 
+INTERACTIONS_CSV = os.path.join(ROOT, "results", "live_interactions.csv")
+INTERACTIONS_HEADERS = [
+    "timestamp",
+    "trigger",
+    "command",
+    "reply",
+    "stt_ms",
+    "exec_ms",
+    "total_ms",
+    "cpu_pct",
+    "ram_pct",
+    "gpu_temp_c",
+    "power_mode",
+]
+
+
+def log_live_interaction(
+    trigger: str,
+    command: str,
+    reply: str,
+    stt_ms: float,
+    exec_ms: float,
+    total_ms: float,
+) -> None:
+    """
+    Automatically appends every voice interaction, response, latency, and telemetry
+    to results/live_interactions.csv for real-time tracking and performance analysis.
+    """
+    try:
+        os.makedirs(os.path.dirname(INTERACTIONS_CSV), exist_ok=True)
+        file_empty = not os.path.exists(INTERACTIONS_CSV) or os.path.getsize(INTERACTIONS_CSV) == 0
+
+        telemetry = get_system_telemetry()
+
+        row = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "trigger": trigger,
+            "command": command or "[No speech detected]",
+            "reply": reply or "",
+            "stt_ms": round(stt_ms, 1),
+            "exec_ms": round(exec_ms, 1),
+            "total_ms": round(total_ms, 1),
+            "cpu_pct": telemetry.get("cpu_load", ""),
+            "ram_pct": telemetry.get("mem_percent", ""),
+            "gpu_temp_c": telemetry.get("gpu_temp", ""),
+            "power_mode": telemetry.get("power_mode", ""),
+        }
+
+        with open(INTERACTIONS_CSV, "a", newline="", encoding="utf-8") as f:
+            import csv
+            writer = csv.DictWriter(f, fieldnames=INTERACTIONS_HEADERS)
+            if file_empty:
+                writer.writeheader()
+            writer.writerow(row)
+        log_status(f"Logged interaction to {os.path.relpath(INTERACTIONS_CSV, ROOT)} ({total_ms:.0f}ms)")
+    except Exception as e:
+        log_status(f"Interaction logging warning: {e}")
+
+
 # ---------------------------------------------------------------------------
 # 7. DUAL ACTIVATION: Porcupine Wake Word ('Jarvis') + Global Hotkey ('F2')
 # ---------------------------------------------------------------------------
@@ -699,6 +919,7 @@ class DualActivationManager:
                 return
             self.is_active = True
 
+        t_session_start = time.time()
         log_status(f"System activated via {trigger_source}!")
         display_dialogue("ACTIVATION", trigger_source)
         try:
@@ -707,10 +928,25 @@ class DualActivationManager:
 
             # Capture voice command (6 seconds)
             log_status("Listening for voice command (speak now)...")
+            t_listen = time.time()
             command = listen_and_transcribe(duration=6.0)
+            stt_ms = (time.time() - t_listen) * 1000
 
             # Execute through deterministic router
+            t_exec = time.time()
             JarvisPersonalityRouter.execute(command)
+            exec_ms = (time.time() - t_exec) * 1000
+            total_ms = (time.time() - t_session_start) * 1000
+
+            # Record interaction to results/live_interactions.csv
+            log_live_interaction(
+                trigger=trigger_source,
+                command=command,
+                reply=voice_synth.last_spoken,
+                stt_ms=stt_ms,
+                exec_ms=exec_ms,
+                total_ms=total_ms,
+            )
         except Exception as e:
             log_status(f"Activation handling error: {e}")
         finally:

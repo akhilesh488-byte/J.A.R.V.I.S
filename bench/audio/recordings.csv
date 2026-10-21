@@ -1,0 +1,7 @@
+id,speaker,path,duration_s,peak_level,clipped,timestamp
+t001,S1,bench/audio/t001_S1.wav,1.73,32668,False,2026-10-21T21:01:58.800379
+t004,S1,bench/audio/t004_S1.wav,4.48,32710,False,2026-10-21T21:02:26.788765
+t005,S1,bench/audio/t005_S1.wav,1.79,32533,False,2026-10-21T21:02:35.075564
+t008,S1,bench/audio/t008_S1.wav,1.66,32729,False,2026-10-21T21:02:40.079211
+t009,S1,bench/audio/t009_S1.wav,1.47,32674,False,2026-10-21T21:02:46.707956
+t012,S1,bench/audio/t012_S1.wav,1.98,32667,False,2026-10-21T21:02:53.137673

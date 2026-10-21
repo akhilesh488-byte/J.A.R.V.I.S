@@ -86,7 +86,14 @@ class DirectRoutingAndSystemToolsTests(unittest.TestCase):
             mock_win.activate.assert_called()
 
         # Test play_pause_media when no media session exists
-        self.assertEqual(play_pause_media(), "Error: No active media session found to control.")
+        mock_mgr_none = MagicMock()
+        mock_mgr_none.get_current_session.return_value = None
+        mock_mgr_none.get_sessions.return_value = []
+        with patch("winsdk.windows.media.control.GlobalSystemMediaTransportControlsSessionManager.request_async") as mock_req:
+            async def _fake_req_none():
+                return mock_mgr_none
+            mock_req.return_value = _fake_req_none()
+            self.assertEqual(play_pause_media(), "Error: No active media session found to control.")
 
         # Test play_pause_media when media is playing
         mock_session_playing = MagicMock()

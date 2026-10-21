@@ -1,0 +1,21 @@
+{
+    "open_app": "Opening vscode.",
+    "add_todo": "Added to your list: finish the physics assignment",
+    "list_todos": "Here's your list: 1. finish the physics assignment; 2. go for a run",
+    "complete_todo": "Marked 'physics assignment' as done.",
+    "set_timer": "Timer set for 15 minute(s).",
+    "set_alarm_at": "Timer set for 487 minute(s).",
+    "list_recent_emails": "Your recent emails: From Priya Sharma: Lab report review",
+    "create_email_draft": "Drafted an email to rao@college.edu with subject 'Leave request'.",
+    "list_upcoming_events": "Your upcoming events: Team meeting at 2026-10-20T14:00:00",
+    "create_event": "Scheduled 'Project review' starting 2026-10-21T10:00:00.",
+    "list_recent_files": "Your recent Drive files: Project report draft; Viva notes",
+    "remember_note": "Noted.",
+    "play_pause_media": "Toggled media playback.",
+    "manage_browser": "Browser action done: new_tab.",
+    "close_current_app": "Closed Visual Studio Code.",
+    "get_window_status": "Active window: Visual Studio Code. Open apps: Chrome, Terminal",
+    "send_whatsapp_message": "WhatsApp message sent to mom.",
+    "delegate_to_researcher": "Researcher agent started on: langgraph checkpointing",
+    "execute_full_project_pipeline": "Project pipeline started: weather app"
+}

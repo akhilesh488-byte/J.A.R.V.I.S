@@ -1,0 +1,2 @@
+timestamp,trigger,command,reply,stt_ms,exec_ms,total_ms,cpu_pct,ram_pct,gpu_temp_c,power_mode
+2026-10-21T20:20:59.270344,Hey Jarvis (Wake Word),What is the system status?,"Hardware telemetry report, sir.",850.5,120.3,970.8,20,58,57,High Performance

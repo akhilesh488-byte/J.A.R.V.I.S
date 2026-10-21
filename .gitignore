@@ -16,6 +16,7 @@ data/screenshot.png
 data/jarvis_command.wav
 *.gguf
 *.crdownload
+results/test_out/
 
 # Secrets and OAuth Credentials
 credentials.json
