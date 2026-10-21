@@ -52,6 +52,20 @@ def _speak_local(text: str) -> None:
     _tts_queue.join()
 
 
+def play_audio_file(wav_path: str) -> None:
+    if sys.platform == "win32":
+        try:
+            import winsound
+            winsound.PlaySound(wav_path, winsound.SND_FILENAME)
+            return
+        except Exception:
+            pass
+    import subprocess
+    safe_path = wav_path.replace("'", "''")
+    ps_cmd = f"(New-Object System.Media.SoundPlayer '{safe_path}').PlaySync()"
+    subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], check=True)
+
+
 def speak(text: str) -> None:
     """
     Dispatches to ElevenLabs if configured (config.TTS_PROVIDER == "elevenlabs"),
@@ -61,6 +75,17 @@ def speak(text: str) -> None:
     """
     if not text:
         return
+
+    # Check pre-cached phrases first (0ms latency, zero hallucination)
+    try:
+        from jarvis_local import get_cached_audio
+        cached = get_cached_audio(text)
+        if cached and os.path.exists(cached):
+            play_audio_file(cached)
+            return
+    except Exception:
+        pass
+
     if config.TTS_PROVIDER == "elevenlabs":
         from audio import tts_elevenlabs
         tts_elevenlabs.speak(text)
@@ -69,11 +94,7 @@ def speak(text: str) -> None:
             from audio.engines import xtts_engine
             out_wav = xtts_engine.synthesize(text, speaker_wav=DEFAULT_SPEAKER_WAV)
             if out_wav and os.path.exists(out_wav):
-                if sys.platform == "win32":
-                    import subprocess
-                    safe_path = out_wav.replace("'", "''")
-                    ps_cmd = f"(New-Object System.Media.SoundPlayer '{safe_path}').PlaySync()"
-                    subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], check=True)
+                play_audio_file(out_wav)
             else:
                 _speak_local(text)
         except Exception as e:

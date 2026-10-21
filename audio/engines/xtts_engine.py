@@ -155,12 +155,10 @@ class XTTSEngine:
                 speaker_wav=ref_wav,
                 language=language,
                 file_path=output_path,
-                gpt_cond_len=int(gpt_cond_len),
-                temperature=temperature,
-                repetition_penalty=repetition_penalty,
                 speed=speed,
-                enable_text_splitting=False,
             )
+            from jarvis_local import sanitize_xtts_audio
+            sanitize_xtts_audio(output_path, max_words=len(cleaned_text.split()))
             return output_path
         raise RuntimeError("Coqui XTTS model is not available.")
 

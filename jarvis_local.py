@@ -48,6 +48,18 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 REFERENCE_WAV = os.path.join(ROOT, "jarvis_sample.wav")
 OUTPUT_WAV = os.path.join(ROOT, "jarvis_output.wav")
 DICTATION_FILE = os.path.join(ROOT, "jarvis_dictation.txt")
+CACHE_DIR = os.path.join(ROOT, "jarvis_voice_cache")
+
+
+def get_cached_audio(text: str, cache_dir: str = CACHE_DIR) -> str | None:
+    if not text:
+        return None
+    key = re.sub(r"[\W]+", "_", text.lower()).strip("_")
+    if not key:
+        return None
+    path = os.path.join(cache_dir, f"{key}.wav")
+    return path if os.path.exists(path) else None
+
 
 
 def load_env_vars() -> None:
@@ -192,6 +204,92 @@ def _patch_xtts_runtime():
         print(f"[JARVIS] Runtime patch notice: {e}")
 
 
+def sanitize_xtts_audio(wav_path: str, max_words: int | None = None) -> bool:
+    """
+    Cleans synthesized audio without truncating normal speech:
+      1. Trims trailing dead silence / carrier hum at the end of speech.
+      2. If the model experiences a runaway generation (overrun beyond expected duration),
+         detects where speech transitioned into a pure monotone hallucination (e.g. 750Hz beep)
+         and cleanly truncates the tone tail.
+      3. Applies a smooth 30ms cosine fade-out at the end.
+    """
+    try:
+        import wave
+        import numpy as np
+
+        with wave.open(wav_path, "rb") as w:
+            sr = w.getframerate()
+            n_channels = w.getnchannels()
+            sampwidth = w.getsampwidth()
+            n_frames = w.getnframes()
+            data = np.frombuffer(w.readframes(n_frames), dtype=np.int16)
+
+        if len(data) == 0:
+            return False
+
+        dur_sec = len(data) / sr
+        # Normal speaking rate is ~0.3-0.5s per word. Anything past this is an overrun.
+        expected_max_sec = max(3.0, (max_words or 10) * 0.75 + 1.8) if max_words else 15.0
+
+        win_len = int(sr * 0.04)  # 40ms window
+        hop_len = int(sr * 0.02)  # 20ms hop
+        if len(data) <= win_len:
+            return True
+        n_wins = (len(data) - win_len) // hop_len
+
+        last_audio_idx = len(data)
+
+        # 1. Backward scan: trim trailing dead silence after speech has ended
+        for i in range(n_wins - 1, -1, -1):
+            start = i * hop_len
+            chunk = data[start:start + win_len]
+            rms = np.sqrt(np.mean(chunk.astype(float) ** 2))
+            if rms > 450:
+                last_audio_idx = min(len(data), start + win_len + int(sr * 0.15))
+                break
+
+        # 2. Overrun protection: if file ran away far beyond expected word length,
+        # detect if a pure continuous tone (>35% energy in a single FFT bin) has taken over
+        if dur_sec > expected_max_sec:
+            for i in range(int(sr * 1.0) // hop_len, n_wins):
+                start = i * hop_len
+                chunk = data[start:start + win_len]
+                fft = np.abs(np.fft.rfft(chunk))
+                tot = np.sum(fft ** 2)
+                if tot > 0:
+                    peak_ratio = np.max(fft ** 2) / tot
+                    peak_freq = np.argmax(fft) * sr / (2 * len(fft))
+                    if peak_ratio > 0.35 and peak_freq > 300:
+                        last_audio_idx = min(last_audio_idx, max(int(sr * 1.0), start))
+                        break
+
+            if last_audio_idx == len(data):
+                last_audio_idx = int(expected_max_sec * sr)
+
+        # Preserve at least minimum speech samples
+        min_samples = int(sr * min(dur_sec, 0.8))
+        last_audio_idx = max(last_audio_idx, min_samples)
+
+        cleaned = data[:last_audio_idx].copy()
+
+        # Smooth 30ms cosine fade-out to prevent audio pops
+        fade_len = min(int(sr * 0.03), len(cleaned))
+        if fade_len > 0:
+            fade = np.linspace(1.0, 0.0, fade_len)
+            cleaned[-fade_len:] = (cleaned[-fade_len:] * fade).astype(np.int16)
+
+        with wave.open(wav_path, "wb") as w:
+            w.setnchannels(n_channels)
+            w.setsampwidth(sampwidth)
+            w.setframerate(sr)
+            w.writeframes(cleaned.tobytes())
+
+        return True
+    except Exception as e:
+        print(f"Audio sanitizer warning: {e}")
+        return False
+
+
 class VoiceSynthesizer:
     def __init__(self, reference_wav: str = REFERENCE_WAV, output_wav: str = OUTPUT_WAV):
         self.reference_wav = reference_wav
@@ -242,7 +340,9 @@ class VoiceSynthesizer:
                 log_status(f"Playback error on {chunk_path}: {e}")
             finally:
                 try:
-                    if os.path.exists(chunk_path):
+                    # Never delete pre-cached files in jarvis_voice_cache
+                    is_cached = os.path.abspath(chunk_path).startswith(os.path.abspath(CACHE_DIR))
+                    if not is_cached and os.path.exists(chunk_path):
                         os.remove(chunk_path)
                 except Exception:
                     pass
@@ -269,7 +369,14 @@ class VoiceSynthesizer:
                 log_status(f"TTS Fallback error: {e2}")
 
     def _play_audio_file(self, wav_path: str) -> None:
-        """Plays WAV output synchronously using PowerShell SoundPlayer."""
+        """Plays WAV output synchronously using native winsound (instant) or fallback."""
+        try:
+            if sys.platform == "win32":
+                import winsound
+                winsound.PlaySound(wav_path, winsound.SND_FILENAME)
+                return
+        except Exception as e:
+            log_status(f"winsound error ({e}), falling back to SoundPlayer...")
         try:
             safe_path = wav_path.replace("'", "''")
             ps_cmd = f"(New-Object System.Media.SoundPlayer '{safe_path}').PlaySync()"
@@ -278,13 +385,22 @@ class VoiceSynthesizer:
             log_status(f"Playback error: {e}")
 
     def speak(self, text: str) -> None:
-        """Synthesize text using asynchronous sentence-level streaming playback."""
+        """Synthesize text using pre-cached audio or streaming XTTS with overrun sanitization."""
         clean_prompt = clean_text_for_tts(text)
         if not clean_prompt:
             return
 
         with self._lock:
             display_dialogue("JARVIS", clean_prompt)
+
+            # 1. Check full phrase in pre-cache first (0ms latency, zero hallucination)
+            full_cached = get_cached_audio(clean_prompt)
+            if full_cached and os.path.exists(full_cached):
+                self._ensure_playback_worker()
+                self._playback_queue.put(full_cached)
+                self._playback_queue.join()
+                return
+
             speaker_ref = self.reference_wav if (self.reference_wav and os.path.exists(self.reference_wav)) else os.path.join(ROOT, "jarvis_sample.wav")
             if self.tts and os.path.exists(speaker_ref):
                 try:
@@ -293,24 +409,33 @@ class VoiceSynthesizer:
                         sentences = [clean_prompt]
 
                     self._ensure_playback_worker()
-
                     tts_speed = float(os.environ.get("JARVIS_TTS_SPEED", "1.05"))
+
                     for i, sentence in enumerate(sentences):
                         cleaned_sentence = clean_text_for_tts(sentence)
                         if not cleaned_sentence:
                             continue
+
+                        # Check if sentence is pre-cached
+                        cached_sentence = get_cached_audio(cleaned_sentence)
+                        if cached_sentence and os.path.exists(cached_sentence):
+                            self._playback_queue.put(cached_sentence)
+                            continue
+
+                        # Step 1: Default natural calibrated XTTS weights (no temperature=0.2 / repetition_penalty)
                         temp_chunk = os.path.join(tempfile.gettempdir(), f"jarvis_chunk_{int(time.time()*1000)}_{i}.wav")
                         self.tts.tts_to_file(
                             text=cleaned_sentence,
                             speaker_wav=speaker_ref,
                             language="en",
                             file_path=temp_chunk,
-                            gpt_cond_len=6,
-                            temperature=0.2,
-                            repetition_penalty=1.8,
                             speed=tts_speed,
-                            enable_text_splitting=False,
                         )
+
+                        # Step 2: Sanitize audio immediately to cut dead silence and runaway beep tones
+                        num_words = len(cleaned_sentence.split())
+                        sanitize_xtts_audio(temp_chunk, max_words=num_words)
+
                         self._playback_queue.put(temp_chunk)
 
                     # Wait for all queued audio chunks to complete playback before returning
