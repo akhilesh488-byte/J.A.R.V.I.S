@@ -26,6 +26,18 @@ def file_sha256(path: str) -> Optional[str]:
     if not os.path.exists(path):
         return None
     h = hashlib.sha256()
+    if os.path.isdir(path):
+        for root, _, files in os.walk(path):
+            for f in sorted(files):
+                fp = os.path.join(root, f)
+                h.update(f.encode("utf-8"))
+                try:
+                    with open(fp, "rb") as subf:
+                        while chunk := subf.read(65536):
+                            h.update(chunk)
+                except Exception:
+                    pass
+        return h.hexdigest()
     with open(path, "rb") as f:
         while chunk := f.read(65536):
             h.update(chunk)

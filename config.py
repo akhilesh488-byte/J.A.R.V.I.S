@@ -99,9 +99,16 @@ VAD_NO_SPEECH_TIMEOUT = 5.0
 VAD_MAX_SECONDS = 15.0
 
 # --- Speech-to-text ---
+_has_cuda = False
+try:
+    import torch
+    _has_cuda = torch.cuda.is_available()
+except Exception:
+    pass
+
 WHISPER_MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "small")  # tiny | small | small.en | medium.en | large-v3-turbo | distil-large-v3
-WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "cpu")  # cpu | cuda | auto
-WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "float16")  # float16 | int8 | int8_float16 (CUDA)
+WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "cuda" if _has_cuda else "cpu")  # cpu | cuda | auto
+WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "float16" if WHISPER_DEVICE == "cuda" else "int8")  # float16 | int8 | int8_float16 (CUDA)
 WHISPER_LANGUAGE = os.environ.get("WHISPER_LANGUAGE", "en")  # "en" | "" for auto-detect
 WHISPER_BEAM_SIZE = int(os.environ.get("WHISPER_BEAM_SIZE", "5"))
 WHISPER_VAD_FILTER = _bool("WHISPER_VAD_FILTER", True)   # filters non-speech before decoding

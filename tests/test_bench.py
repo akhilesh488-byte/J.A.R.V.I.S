@@ -199,6 +199,50 @@ class TestBenchCsvAndDataset(unittest.TestCase):
         self.assertIsNotNone(env["hashes"]["dataset_sha256"])
         self.assertTrue(os.path.exists(out_json))
 
+    def test_live_audio_benchmark(self):
+        import shutil
+        import tempfile
+        from bench.dataset import load_audio_directory
+
+        temp_audio_dir = tempfile.mkdtemp(prefix="jarvis_bench_audio_")
+        test_wav_src = os.path.join(ROOT, "test_calibrated.wav")
+        self.assertTrue(os.path.exists(test_wav_src))
+
+        # Copy test wave file into audio directory
+        shutil.copy2(test_wav_src, os.path.join(temp_audio_dir, "01_cmd.wav"))
+
+        try:
+            # Test loader
+            rows = load_audio_directory(temp_audio_dir)
+            self.assertEqual(len(rows), 1)
+            self.assertIn("01_cmd", rows[0].id)
+            self.assertEqual(rows[0].split, "live_audio")
+            self.assertTrue(os.path.exists(rows[0].audio_path))
+
+            # Test live benchmark runner execution with STT
+            out_dir = os.path.join(ROOT, "results", "test_audio_out")
+            csv_path = run_benchmark(
+                experiment="live_audio_test",
+                machine="TestBox",
+                provider_name="stub",
+                out_dir=out_dir,
+                audio_dir=temp_audio_dir,
+                repeats=1,
+                warmup=0,
+            )
+
+            self.assertTrue(os.path.exists(csv_path))
+            with open(csv_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                out_rows = list(reader)
+                self.assertEqual(len(out_rows), 1)
+                r = out_rows[0]
+                self.assertTrue(len(r["audio_path"]) > 0)
+                self.assertGreater(float(r["stt_latency_ms"]), 0.0)
+                self.assertTrue(len(r["transcribed_text"]) > 0)
+        finally:
+            shutil.rmtree(temp_audio_dir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

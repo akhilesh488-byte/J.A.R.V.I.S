@@ -57,7 +57,23 @@ def load_model(reset: bool = False):
     if _model is not None:
         return _model
 
+    import torch
+    torch_lib = os.path.join(os.path.dirname(torch.__file__), "lib")
+    if os.path.exists(torch_lib) and hasattr(os, "add_dll_directory"):
+        try:
+            os.add_dll_directory(torch_lib)
+        except Exception:
+            pass
+
     from faster_whisper import WhisperModel
+
+    device = config.WHISPER_DEVICE
+    if device == "auto" or (device == "cpu" and torch.cuda.is_available() and "WHISPER_DEVICE" not in os.environ):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    compute_type = config.WHISPER_COMPUTE_TYPE
+    if device == "cpu" and compute_type == "float16":
+        compute_type = "int8"
 
     to_try = [config.WHISPER_MODEL_SIZE] + [
         m for m in _FALLBACK_ORDER if m != config.WHISPER_MODEL_SIZE
@@ -67,8 +83,8 @@ def load_model(reset: bool = False):
         try:
             _model = WhisperModel(
                 size,
-                device=config.WHISPER_DEVICE,
-                compute_type=config.WHISPER_COMPUTE_TYPE,
+                device=device,
+                compute_type=compute_type,
                 cpu_threads=2,
                 num_workers=1,
             )

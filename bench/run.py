@@ -25,7 +25,7 @@ config.BENCHMARK_MODE = True
 config.USE_MEMORY = False
 config.LLM_TEMPERATURE = 0.0
 
-from bench.dataset import DatasetRow, load_dataset
+from bench.dataset import DatasetRow, load_dataset, load_audio_directory
 from bench.env_capture import capture_environment
 from bench.mock_tools import BenchmarkMockTools
 from bench.providers import get_provider
@@ -43,7 +43,10 @@ CSV_COLUMNS = [
     "command_id",
     "category",
     "split",
+    "audio_path",
+    "stt_latency_ms",
     "text",
+    "transcribed_text",
     "expected_tool",
     "expected_args",
     "tool_called",
@@ -93,7 +96,8 @@ def run_benchmark(
     machine: str,
     provider_name: str,
     out_dir: str,
-    dataset_path: str,
+    dataset_path: str | None = None,
+    audio_dir: str | None = None,
     repeats: int = 5,
     model_tag: str | None = None,
     warmup: int = 1,
@@ -103,13 +107,23 @@ def run_benchmark(
     csv_path = os.path.join(out_dir, csv_filename)
     env_json_path = os.path.join(out_dir, "env.json")
 
-    # Capture environment metadata and hashes
-    capture_environment(dataset_path=dataset_path, output_path=env_json_path)
+    # Ingest from custom audio directory or dataset file
+    if audio_dir:
+        dataset: List[DatasetRow] = load_audio_directory(audio_dir)
+        source_desc = f"Custom Audio Directory: {audio_dir} ({len(dataset)} recordings)"
+        meta_source = audio_dir
+    elif dataset_path:
+        dataset: List[DatasetRow] = load_dataset(dataset_path)
+        source_desc = f"Dataset: {dataset_path} ({len(dataset)} rows)"
+        meta_source = dataset_path
+    else:
+        raise ValueError("Must provide either --audio-dir or --dataset")
 
-    # Load dataset
-    dataset: List[DatasetRow] = load_dataset(dataset_path)
     if not dataset:
-        raise ValueError(f"No records found in dataset: {dataset_path}")
+        raise ValueError(f"No records found in source: {source_desc}")
+
+    # Capture environment metadata and hashes
+    capture_environment(dataset_path=meta_source, output_path=env_json_path)
 
     # Initialize Provider and Mock Tools
     provider = get_provider(provider_name, model_tag=model_tag)
@@ -128,12 +142,12 @@ def run_benchmark(
         csv_file.flush()
 
     print(f"\n============================================================")
-    print(f"  J.A.R.V.I.S. Benchmark Runner")
+    print(f"  J.A.R.V.I.S. Benchmark Runner (Audio & Intent Pipeline)")
     print(f"============================================================")
     print(f"  Experiment : {experiment}")
     print(f"  Machine    : {machine}")
     print(f"  Provider   : {provider_name} ({provider.model})")
-    print(f"  Dataset    : {dataset_path} ({len(dataset)} rows)")
+    print(f"  Source     : {source_desc}")
     print(f"  Repeats    : {repeats}")
     print(f"  Output CSV : {csv_path}")
     print(f"  Resumed    : {len(completed_runs)} rows already completed")
@@ -145,9 +159,20 @@ def run_benchmark(
         warmup_item = dataset[0]
         try:
             mock.reset()
-            provider.ask(warmup_item.text, dispatch_table, history=warmup_item.history)
+            warmup_text = warmup_item.text
+            if warmup_item.audio_path and os.path.exists(warmup_item.audio_path):
+                from audio.engines.faster_whisper_engine import FasterWhisperEngine
+                stt_warmup = FasterWhisperEngine().transcribe(warmup_item.audio_path)
+                warmup_text = stt_warmup.text.strip()
+            provider.ask(warmup_text, dispatch_table, history=warmup_item.history)
         except Exception as e:
             print(f"Warm-up exception (proceeding): {e}")
+
+    # Lazily initialize STT engine if any audio row exists
+    stt_engine = None
+    if any(bool(r.audio_path) for r in dataset):
+        from audio.engines.faster_whisper_engine import FasterWhisperEngine
+        stt_engine = FasterWhisperEngine()
 
     # Execution Loop
     for run_num in range(1, repeats + 1):
@@ -164,9 +189,25 @@ def run_benchmark(
             t_before = get_telemetry_snapshot()
             timestamp = datetime.datetime.now().isoformat()
 
+            # Live audio STT processing (no text bypass)
+            stt_latency_ms = 0.0
+            transcribed_text = ""
+            if row.audio_path:
+                if not os.path.exists(row.audio_path):
+                    raise FileNotFoundError(f"Raw audio recording not found: {row.audio_path}")
+                if stt_engine is None:
+                    from audio.engines.faster_whisper_engine import FasterWhisperEngine
+                    stt_engine = FasterWhisperEngine()
+                stt_res = stt_engine.transcribe(row.audio_path)
+                stt_latency_ms = stt_res.latency_ms
+                transcribed_text = stt_res.text.strip()
+                query_text = transcribed_text
+            else:
+                query_text = row.text
+
             error_msg = None
             try:
-                res = provider.ask(row.text, dispatch_table, history=row.history)
+                res = provider.ask(query_text, dispatch_table, history=row.history)
             except Exception as ex:
                 error_msg = str(ex)
                 res = {
@@ -213,7 +254,10 @@ def run_benchmark(
                 "command_id": row.id,
                 "category": row.category,
                 "split": row.split,
+                "audio_path": row.audio_path or "",
+                "stt_latency_ms": round(stt_latency_ms, 2),
                 "text": row.text,
+                "transcribed_text": transcribed_text,
                 "expected_tool": row.expected_tool or "",
                 "expected_args": json.dumps(row.expected_args),
                 "tool_called": res.get("tool_called") or "",
@@ -246,9 +290,10 @@ def run_benchmark(
             completed_runs.add((row.id, run_num))
 
             status_mark = "OK" if score["tool_ok"] and score["args_ok"] else "FAIL"
+            display_text = transcribed_text if transcribed_text else row.text
             print(
-                f"[{status_mark:4}] Run {run_num}/{repeats} | ID: {row.id:3} | {row.text[:30]:30} "
-                f"| Tool: {str(record['tool_called']):15} | TTFT: {record['ttft_ms']:6.1f}ms | Total: {record['total_ms']:6.1f}ms"
+                f"[{status_mark:4}] Run {run_num}/{repeats} | ID: {row.id:3} | {display_text[:30]:30} "
+                f"| Tool: {str(record['tool_called']):15} | STT: {stt_latency_ms:6.1f}ms | Total: {record['total_ms']:6.1f}ms"
             )
 
     csv_file.close()
@@ -271,13 +316,24 @@ def main():
     parser.add_argument(
         "--dataset",
         type=str,
-        default=os.path.join(ROOT, "bench", "data", "sample_dataset.jsonl"),
+        default=None,
         help="Path to dataset JSONL file",
+    )
+    parser.add_argument(
+        "--audio-dir",
+        type=str,
+        default=None,
+        help="Path to custom audio directory containing raw .wav recordings",
     )
     parser.add_argument("--repeats", "-n", type=int, default=5, help="Number of repetitions per item (default 5)")
     parser.add_argument("--warmup", type=int, default=1, help="Number of warm-up iterations (default 1)")
     parser.add_argument("--dry-run", action="store_true", help="Run a single-repeat dry run on sample dataset")
     args = parser.parse_args()
+
+    # Determine data source
+    dataset_path = None
+    if not args.audio_dir:
+        dataset_path = args.dataset or os.path.join(ROOT, "bench", "data", "sample_dataset.jsonl")
 
     reps = 1 if args.dry_run else args.repeats
     run_benchmark(
@@ -285,7 +341,8 @@ def main():
         machine=args.machine,
         provider_name=args.provider,
         out_dir=args.out,
-        dataset_path=args.dataset,
+        dataset_path=dataset_path,
+        audio_dir=args.audio_dir,
         repeats=reps,
         model_tag=args.model,
         warmup=args.warmup,

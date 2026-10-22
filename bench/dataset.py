@@ -86,3 +86,51 @@ def load_dataset(jsonl_path: str) -> List[DatasetRow]:
             except Exception as e:
                 raise ValueError(f"Invalid JSON at {jsonl_path}:{line_num}: {e}") from e
     return rows
+
+
+def load_audio_directory(audio_dir: str) -> List[DatasetRow]:
+    """
+    Ingest live audio/voice recordings from a designated custom audio directory.
+    Supports raw .wav files directly, with optional metadata/references if present.
+    """
+    if not os.path.exists(audio_dir):
+        raise FileNotFoundError(f"Custom audio directory not found: {audio_dir}")
+
+    # Check for optional reference/metadata files
+    refs = {}
+    ref_file = os.path.join(audio_dir, "references.json")
+    if os.path.exists(ref_file):
+        try:
+            with open(ref_file, "r", encoding="utf-8") as rf:
+                refs = json.load(rf)
+        except Exception:
+            refs = {}
+
+    rows: List[DatasetRow] = []
+    wav_files = sorted([f for f in os.listdir(audio_dir) if f.lower().endswith(".wav")])
+    if not wav_files:
+        raise ValueError(f"No .wav audio recordings found in designated directory: {audio_dir}")
+
+    for idx, f in enumerate(wav_files, start=1):
+        full_path = os.path.join(audio_dir, f)
+        base_id = os.path.splitext(f)[0]
+        ref_info = refs.get(base_id, {}) if isinstance(refs, dict) else {}
+        expected_text = ref_info.get("reference") or ref_info.get("text") or ""
+        expected_tool = ref_info.get("expected_tool")
+        expected_args = ref_info.get("expected_args") or {}
+        category = ref_info.get("category", "live_audio")
+
+        rows.append(
+            DatasetRow(
+                id=f"audio_{idx:03d}_{base_id}",
+                category=category,
+                split="live_audio",
+                text=expected_text,
+                audio_path=full_path,
+                expected_tool=expected_tool,
+                expected_args=expected_args,
+                expected_reply_type=ref_info.get("expected_reply_type", "tool_call"),
+            )
+        )
+    return rows
+

@@ -63,6 +63,16 @@ def precache_all(force: bool = False):
     print(f"[PRECACHE] Loading Coqui XTTS v2 on {device.upper()}...")
     tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
 
+    latents_path = os.path.join(ROOT, "jarvis_latents.pth")
+    gpt_cond_latent = None
+    speaker_embedding = None
+    if os.path.exists(latents_path):
+        print(f"[PRECACHE] Loading pre-extracted speaker latents from {latents_path}...")
+        lat_dict = torch.load(latents_path, map_location=device)
+        gpt_lat = lat_dict.get("gpt_cond_latents")
+        gpt_cond_latent = lat_dict.get("gpt_cond_latent") if gpt_lat is None else gpt_lat
+        speaker_embedding = lat_dict.get("speaker_embedding")
+
     total = len(PHRASES)
     for idx, (key, text) in enumerate(PHRASES.items(), 1):
         out_path = os.path.join(CACHE_DIR, f"{key}.wav")
@@ -73,13 +83,31 @@ def precache_all(force: bool = False):
         print(f"[{idx}/{total}] Caching: '{text}' -> {key}.wav")
         t0 = time.time()
         try:
-            tts.tts_to_file(
-                text=text,
-                speaker_wav=REFERENCE_WAV,
-                language="en",
-                file_path=out_path,
-                speed=1.05,
-            )
+            if gpt_cond_latent is not None and speaker_embedding is not None:
+                xtts_model = tts.synthesizer.tts_model
+                out = xtts_model.inference(
+                    text=text,
+                    language="en",
+                    gpt_cond_latent=gpt_cond_latent,
+                    speaker_embedding=speaker_embedding,
+                    temperature=0.2,
+                    repetition_penalty=2.5,
+                    speed=1.0,
+                )
+                wav_data = (np.array(out["wav"]) * 32767).clip(-32768, 32767).astype(np.int16)
+                with wave.open(out_path, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(24000)
+                    wf.writeframes(wav_data.tobytes())
+            else:
+                tts.tts_to_file(
+                    text=text,
+                    speaker_wav=REFERENCE_WAV,
+                    language="en",
+                    file_path=out_path,
+                    speed=1.0,
+                )
             sanitize_xtts_audio(out_path, max_words=len(text.split()))
             dur = time.time() - t0
             print(f"       Done in {dur:.2f}s")

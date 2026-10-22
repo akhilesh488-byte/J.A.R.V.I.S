@@ -94,6 +94,8 @@ class XTTSEngine:
         self.speaker_wav = speaker_wav or DEFAULT_SPEAKER_WAV
         self.tts = None
         self.device = "cpu"
+        self.gpt_cond_latent = None
+        self.speaker_embedding = None
         self._init_model()
 
     def _init_model(self) -> None:
@@ -104,6 +106,12 @@ class XTTSEngine:
             _patch_xtts_runtime()
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
             self.tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(self.device)
+            latents_path = os.path.join(ROOT, "jarvis_latents.pth")
+            if os.path.exists(latents_path):
+                lat = torch.load(latents_path, map_location=self.device)
+                gpt_lat = lat.get("gpt_cond_latents")
+                self.gpt_cond_latent = lat.get("gpt_cond_latent") if gpt_lat is None else gpt_lat
+                self.speaker_embedding = lat.get("speaker_embedding")
         except Exception as e:
             print(f"[JARVIS] XTTS Load Error: {e}")
             self.tts = None
@@ -124,14 +132,14 @@ class XTTSEngine:
         speaker_wav: Optional[str] = None,
         language: str = "en",
         temperature: float = 0.2,
-        repetition_penalty: float = 1.8,
+        repetition_penalty: float = 2.5,
         gpt_cond_len: int = 6,
-        speed: float = 1.05,
+        speed: float = 1.0,
     ) -> str:
         """
         Synthesize speech with anti-hallucination parameters:
-        - temperature = 0.2 (Lowers pitch randomness, stops sassy pitch shifts)
-        - repetition_penalty = 1.8 (Prevents vocal jumps and continuous tone hallucination)
+        - temperature = 0.2 (Lowers pitch randomness, matches jarvis_sample.wav timbre)
+        - repetition_penalty = 2.5 (Prevents vocal jumps and continuous tone hallucination)
         """
         cleaned_text = clean_text_for_tts(text)
         if not cleaned_text:
@@ -150,13 +158,33 @@ class XTTSEngine:
             self._init_model()
 
         if self.tts is not None:
-            self.tts.tts_to_file(
-                text=cleaned_text,
-                speaker_wav=ref_wav,
-                language=language,
-                file_path=output_path,
-                speed=speed,
-            )
+            if self.gpt_cond_latent is not None and self.speaker_embedding is not None and hasattr(self.tts, "synthesizer"):
+                import wave
+                import numpy as np
+                xtts_model = self.tts.synthesizer.tts_model
+                out = xtts_model.inference(
+                    text=cleaned_text,
+                    language=language,
+                    gpt_cond_latent=self.gpt_cond_latent,
+                    speaker_embedding=self.speaker_embedding,
+                    temperature=temperature,
+                    repetition_penalty=repetition_penalty,
+                    speed=speed,
+                )
+                wav_data = (np.array(out["wav"]) * 32767).clip(-32768, 32767).astype(np.int16)
+                with wave.open(output_path, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(24000)
+                    wf.writeframes(wav_data.tobytes())
+            else:
+                self.tts.tts_to_file(
+                    text=cleaned_text,
+                    speaker_wav=ref_wav,
+                    language=language,
+                    file_path=output_path,
+                    speed=speed,
+                )
             from jarvis_local import sanitize_xtts_audio
             sanitize_xtts_audio(output_path, max_words=len(cleaned_text.split()))
             return output_path

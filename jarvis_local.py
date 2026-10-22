@@ -319,6 +319,8 @@ class VoiceSynthesizer:
         self.output_wav = output_wav
         self.tts = None
         self.device = "cuda"
+        self.gpt_cond_latent = None
+        self.speaker_embedding = None
         self._lock = threading.Lock()
         self._playback_queue = queue.Queue()
         self._worker_thread = None
@@ -334,7 +336,15 @@ class VoiceSynthesizer:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
             log_status(f"Loading Coqui XTTS v2 on {self.device.upper()}...")
             self.tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(self.device)
-            log_status("XTTS v2 voice cloning initialized.")
+            latents_path = os.path.join(ROOT, "jarvis_latents.pth")
+            if os.path.exists(latents_path):
+                lat = torch.load(latents_path, map_location=self.device)
+                gpt_lat = lat.get("gpt_cond_latents")
+                self.gpt_cond_latent = lat.get("gpt_cond_latent") if gpt_lat is None else gpt_lat
+                self.speaker_embedding = lat.get("speaker_embedding")
+                log_status("XTTS v2 loaded calibrated speaker latents (timbre matched to jarvis_sample.wav).")
+            else:
+                log_status("XTTS v2 voice cloning initialized.")
         except Exception as e:
             print(f"[JARVIS] XTTS Load Error: {e}")
             log_status(f"XTTS v2 warning ({e}). Windows system voice will serve as fallback.")
@@ -425,14 +435,17 @@ class VoiceSynthesizer:
                 return
 
             speaker_ref = self.reference_wav if (self.reference_wav and os.path.exists(self.reference_wav)) else os.path.join(ROOT, "jarvis_sample.wav")
-            if self.tts and os.path.exists(speaker_ref):
+            if self.tts and (os.path.exists(speaker_ref) or self.gpt_cond_latent is not None):
                 try:
-                    sentences = [s.strip() for s in re.split(r'(?<=[.!?]) +', clean_prompt) if s.strip()]
+                    if len(clean_prompt.split()) <= 15:
+                        sentences = [clean_prompt]
+                    else:
+                        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', clean_prompt) if s.strip()]
                     if not sentences:
                         sentences = [clean_prompt]
 
                     self._ensure_playback_worker()
-                    tts_speed = float(os.environ.get("JARVIS_TTS_SPEED", "1.05"))
+                    tts_speed = float(os.environ.get("JARVIS_TTS_SPEED", "1.0"))
 
                     for i, sentence in enumerate(sentences):
                         cleaned_sentence = clean_text_for_tts(sentence)
@@ -445,15 +458,34 @@ class VoiceSynthesizer:
                             self._playback_queue.put(cached_sentence)
                             continue
 
-                        # Step 1: Default natural calibrated XTTS weights (no temperature=0.2 / repetition_penalty)
                         temp_chunk = os.path.join(tempfile.gettempdir(), f"jarvis_chunk_{int(time.time()*1000)}_{i}.wav")
-                        self.tts.tts_to_file(
-                            text=cleaned_sentence,
-                            speaker_wav=speaker_ref,
-                            language="en",
-                            file_path=temp_chunk,
-                            speed=tts_speed,
-                        )
+
+                        # Step 1: Calibrated inference using pre-extracted speaker latents
+                        if self.gpt_cond_latent is not None and self.speaker_embedding is not None and hasattr(self.tts, "synthesizer"):
+                            xtts_model = self.tts.synthesizer.tts_model
+                            out = xtts_model.inference(
+                                text=cleaned_sentence,
+                                language="en",
+                                gpt_cond_latent=self.gpt_cond_latent,
+                                speaker_embedding=self.speaker_embedding,
+                                temperature=0.2,
+                                repetition_penalty=2.5,
+                                speed=tts_speed,
+                            )
+                            wav_data = (np.array(out["wav"]) * 32767).clip(-32768, 32767).astype(np.int16)
+                            with wave.open(temp_chunk, "wb") as wf:
+                                wf.setnchannels(1)
+                                wf.setsampwidth(2)
+                                wf.setframerate(24000)
+                                wf.writeframes(wav_data.tobytes())
+                        else:
+                            self.tts.tts_to_file(
+                                text=cleaned_sentence,
+                                speaker_wav=speaker_ref,
+                                language="en",
+                                file_path=temp_chunk,
+                                speed=tts_speed,
+                            )
 
                         # Step 2: Sanitize audio immediately to cut dead silence and runaway beep tones
                         num_words = len(cleaned_sentence.split())

@@ -179,9 +179,21 @@ class OllamaBenchmarkProvider(BenchmarkProvider):
             prompt_eval_dur_ns += meta.get("prompt_eval_duration", 0)
             eval_dur_ns += meta.get("eval_duration", 0)
 
-            if content.startswith("{"):
+            clean_json = content.strip()
+            if "```" in clean_json:
+                import re
+                m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", clean_json, re.DOTALL)
+                if m:
+                    clean_json = m.group(1).strip()
+            if not clean_json.startswith("{"):
+                import re
+                m = re.search(r"\{.*?\}", clean_json, re.DOTALL)
+                if m:
+                    clean_json = m.group(0).strip()
+
+            if clean_json.startswith("{"):
                 try:
-                    parsed = json.loads(content)
+                    parsed = json.loads(clean_json)
                     if isinstance(parsed, dict) and "tool" in parsed:
                         valid_json = True
                         name = parsed["tool"]
