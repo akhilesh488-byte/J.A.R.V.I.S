@@ -205,7 +205,7 @@ class TestBenchCsvAndDataset(unittest.TestCase):
         from bench.dataset import load_audio_directory
 
         temp_audio_dir = tempfile.mkdtemp(prefix="jarvis_bench_audio_")
-        test_wav_src = os.path.join(ROOT, "test_calibrated.wav")
+        test_wav_src = os.path.join(ROOT, "jarvis_sample.wav")
         self.assertTrue(os.path.exists(test_wav_src))
 
         # Copy test wave file into audio directory

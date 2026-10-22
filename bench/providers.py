@@ -87,7 +87,7 @@ class OllamaBenchmarkProvider(BenchmarkProvider):
         self,
         model_tag: Optional[str] = None,
         base_url: Optional[str] = None,
-        timeout: float = 30.0,
+        timeout: float = 90.0,
     ):
         self.model = model_tag or config.LOCAL_LLM_MODEL or "jarvis-3b"
         self.base_url = (base_url or config.LOCAL_LLM_URL).replace("/v1", "")

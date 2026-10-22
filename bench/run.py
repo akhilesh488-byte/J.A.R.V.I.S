@@ -101,6 +101,7 @@ def run_benchmark(
     repeats: int = 5,
     model_tag: str | None = None,
     warmup: int = 1,
+    force: bool = False,
 ) -> str:
     os.makedirs(out_dir, exist_ok=True)
     csv_filename = f"{experiment}_{provider_name}_{machine}.csv"
@@ -131,7 +132,9 @@ def run_benchmark(
     dispatch_table = mock.table()
 
     # Load already finished (command_id, run_number) for resuming
-    completed_runs = load_existing_completed_runs(csv_path)
+    if force and os.path.exists(csv_path):
+        os.remove(csv_path)
+    completed_runs = set() if force else load_existing_completed_runs(csv_path)
 
     # Prepare CSV file
     file_exists = os.path.exists(csv_path) and os.path.getsize(csv_path) > 0
@@ -328,6 +331,7 @@ def main():
     parser.add_argument("--repeats", "-n", type=int, default=5, help="Number of repetitions per item (default 5)")
     parser.add_argument("--warmup", type=int, default=1, help="Number of warm-up iterations (default 1)")
     parser.add_argument("--dry-run", action="store_true", help="Run a single-repeat dry run on sample dataset")
+    parser.add_argument("--force", action="store_true", help="Force rerun rows even if present in CSV")
     args = parser.parse_args()
 
     # Determine data source
@@ -346,6 +350,7 @@ def main():
         repeats=reps,
         model_tag=args.model,
         warmup=args.warmup,
+        force=args.force,
     )
 
 
