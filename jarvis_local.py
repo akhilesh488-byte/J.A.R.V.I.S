@@ -842,19 +842,13 @@ class JarvisPersonalityRouter:
             log_status("Launching YouTube and WhatsApp")
             speak("Launching YouTube and WhatsApp now, sir.")
             webbrowser.open("https://youtube.com")
-            try:
-                os.startfile("whatsapp:")
-            except Exception:
-                webbrowser.open("https://web.whatsapp.com")
+            webbrowser.open("https://web.whatsapp.com")
             return True
 
         if any(w in text for w in ["open whatsapp", "open whats app", "open what's app", "whatsapp", "launch whatsapp"]):
             log_status("Launching WhatsApp")
             speak("Launching WhatsApp now, sir.")
-            try:
-                os.startfile("whatsapp:")
-            except Exception:
-                webbrowser.open("https://web.whatsapp.com")
+            webbrowser.open("https://web.whatsapp.com")
             return True
 
         if any(w in text for w in ["open youtube", "open you tube", "open the youtube", "youtube", "launch youtube"]):
