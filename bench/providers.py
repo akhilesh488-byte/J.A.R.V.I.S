@@ -103,13 +103,17 @@ class OllamaBenchmarkProvider(BenchmarkProvider):
 
     def _stream_chat(self, messages: List[Dict[str, str]]) -> Tuple[str, float, Dict[str, Any]]:
         url = f"{self.base_url}/api/chat"
+        options = {
+            "temperature": 0.0,
+            "num_ctx": 4096,
+            "seed": 42,
+        }
         payload = {
             "model": self.model,
             "messages": messages,
             "stream": True,
-            "options": {
-                "temperature": 0.0,
-            },
+            "keep_alive": -1,
+            "options": options,
         }
 
         data = json.dumps(payload).encode("utf-8")
@@ -154,13 +158,18 @@ class OllamaBenchmarkProvider(BenchmarkProvider):
         system_prompt = build_benchmark_system_prompt()
 
         messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
+        # Follow-up rows pass earlier_user/earlier_jarvis through production history path
         if history:
-            messages.extend(history)
+            for turn in history:
+                content = (turn.get("content") or "").strip()
+                if not content.startswith("{") and not content.startswith("TOOL_RESULT:"):
+                    messages.append({"role": turn.get("role", "user"), "content": turn.get("content", "")})
         messages.append({"role": "user", "content": text})
 
         ttft_ms = 0.0
         tokens_in = 0
         tokens_out = 0
+        load_dur_ns = 0
         prompt_eval_dur_ns = 0
         eval_dur_ns = 0
         iterations = 0
@@ -176,8 +185,9 @@ class OllamaBenchmarkProvider(BenchmarkProvider):
             ttft_ms = first_ttft
             tokens_in += meta.get("prompt_eval_count", 0)
             tokens_out += meta.get("eval_count", 0)
-            prompt_eval_dur_ns += meta.get("prompt_eval_duration", 0)
-            eval_dur_ns += meta.get("eval_duration", 0)
+            load_dur_ns += meta.get("load_duration", 0) or 0
+            prompt_eval_dur_ns += meta.get("prompt_eval_duration", 0) or 0
+            eval_dur_ns += meta.get("eval_duration", 0) or 0
 
             if content.startswith("{"):
                 try:
@@ -211,8 +221,9 @@ class OllamaBenchmarkProvider(BenchmarkProvider):
                             second_content, _, meta2 = self._stream_chat(messages)
                             tokens_in += meta2.get("prompt_eval_count", 0)
                             tokens_out += meta2.get("eval_count", 0)
-                            prompt_eval_dur_ns += meta2.get("prompt_eval_duration", 0)
-                            eval_dur_ns += meta2.get("eval_duration", 0)
+                            load_dur_ns += meta2.get("load_duration", 0) or 0
+                            prompt_eval_dur_ns += meta2.get("prompt_eval_duration", 0) or 0
+                            eval_dur_ns += meta2.get("eval_duration", 0) or 0
                             final_reply = second_content
                         else:
                             final_reply = content
@@ -236,16 +247,104 @@ class OllamaBenchmarkProvider(BenchmarkProvider):
             "args": tool_args,
             "valid_json": valid_json,
             "ttft_ms": round(ttft_ms, 2),
+            "load_duration_ms": round(load_dur_ns / 1e6, 2),
+            "prompt_eval_duration_ms": round(prompt_eval_dur_ns / 1e6, 2),
+            "eval_duration_ms": round(eval_dur_ns / 1e6, 2),
+            "prompt_eval_count": tokens_in,
+            "eval_count": tokens_out,
             "total_ms": round(total_ms, 2),
             "tokens_in": tokens_in,
             "tokens_out": tokens_out,
             "iterations": iterations,
             "model": self.model,
             "quant": self.quant,
-            "prompt_eval_duration_ms": round(prompt_eval_dur_ns / 1e6, 2),
-            "eval_duration_ms": round(eval_dur_ns / 1e6, 2),
+            "options": {"temperature": 0.0, "num_ctx": 4096, "seed": 42, "keep_alive": -1},
             "error": error_msg,
         }
+
+
+def run_ollama_diagnostic(
+    base_url: Optional[str] = None,
+    model: Optional[str] = None,
+    prompt: str = "ping",
+    count: int = 20,
+) -> Dict[str, Any]:
+    url = (base_url or config.LOCAL_LLM_URL).replace("/v1", "").rstrip("/")
+    target_model = model or config.LOCAL_LLM_MODEL or "jarvis-3b"
+    options = {
+        "temperature": 0.0,
+        "num_ctx": 4096,
+        "seed": 42,
+    }
+    payload = {
+        "model": target_model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "keep_alive": -1,
+        "options": options,
+    }
+    print(f"\n============================================================")
+    print(f"  Ollama Diagnostic: {count} identical short prompts ('{prompt}')")
+    print(f"  Model: {target_model} | keep_alive=-1 | num_ctx=4096 | seed=42")
+    print(f"============================================================")
+
+    loads_ms = []
+    prefills_ms = []
+    decodes_ms = []
+    totals_ms = []
+
+    for i in range(1, count + 1):
+        req = urllib.request.Request(
+            f"{url}/api/chat",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        t0 = time.perf_counter()
+        with urllib.request.urlopen(req, timeout=30.0) as resp:
+            elapsed = (time.perf_counter() - t0) * 1000.0
+            data = json.loads(resp.read().decode("utf-8"))
+
+        load_ms = (data.get("load_duration", 0) or 0) / 1e6
+        p_eval_ms = (data.get("prompt_eval_duration", 0) or 0) / 1e6
+        e_dur_ms = (data.get("eval_duration", 0) or 0) / 1e6
+        loads_ms.append(load_ms)
+        prefills_ms.append(p_eval_ms)
+        decodes_ms.append(e_dur_ms)
+        totals_ms.append(elapsed)
+
+        print(
+            f"  Call {i:2d}/{count}: load={load_ms:6.1f}ms | prefill={p_eval_ms:6.1f}ms ({data.get('prompt_eval_count',0)} tok) "
+            f"| decode={e_dur_ms:6.1f}ms ({data.get('eval_count',0)} tok) | total={elapsed:6.1f}ms"
+        )
+
+    avg_load = sum(loads_ms) / len(loads_ms)
+    avg_prefill = sum(prefills_ms) / len(prefills_ms)
+    avg_decode = sum(decodes_ms) / len(decodes_ms)
+    avg_total = sum(totals_ms) / len(totals_ms)
+
+    print("\n--- Summary Split ---")
+    print(f"  Load Duration       : avg={avg_load:6.1f}ms (min={min(loads_ms):.1f}ms, max={max(loads_ms):.1f}ms)")
+    print(f"  Prefill (prompt_eval): avg={avg_prefill:6.1f}ms (min={min(prefills_ms):.1f}ms, max={max(prefills_ms):.1f}ms)")
+    print(f"  Decode (eval)       : avg={avg_decode:6.1f}ms (min={min(decodes_ms):.1f}ms, max={max(decodes_ms):.1f}ms)")
+    print(f"  Total Latency       : avg={avg_total:6.1f}ms (min={min(totals_ms):.1f}ms, max={max(totals_ms):.1f}ms)")
+
+    # Run `ollama ps`
+    print("\n--- `ollama ps` Output ---")
+    try:
+        import subprocess
+        ps_out = subprocess.run(["ollama", "ps"], capture_output=True, text=True, check=False)
+        print(ps_out.stdout.strip() or ps_out.stderr.strip() or "(empty ollama ps output)")
+    except Exception as e:
+        print(f"Failed to run 'ollama ps': {e}")
+    print("============================================================\n")
+
+    return {
+        "count": count,
+        "avg_load_ms": avg_load,
+        "avg_prefill_ms": avg_prefill,
+        "avg_decode_ms": avg_decode,
+        "avg_total_ms": avg_total,
+    }
 
 
 class CloudBenchmarkProvider(BenchmarkProvider):

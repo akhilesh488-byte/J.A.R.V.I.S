@@ -5,6 +5,7 @@ mock execution for benchmarks, and optional escalation cascade to cloud models.
 """
 
 import json
+import logging
 import os
 import sys
 import time
@@ -15,10 +16,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
+from core.prompt import USER_PROFILE_BLOCK, build_system_prompt, load_prompt_templates
 from tools import system_tools
 from tools.mock_tools import MockTools
 from tools.tool_registry import build_dispatch_table, validate_tool_call
 
+logger = logging.getLogger(__name__)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 DEFAULT_SYSTEM_PROMPT_TEMPLATE = """You are J.A.R.V.I.S., an efficient AI assistant for desktop control and tasks.
@@ -35,15 +38,6 @@ Do NOT wrap the JSON in markdown code fences.
 
 If no tool is needed or after receiving TOOL_RESULT, respond naturally and concisely to the user.
 """
-
-USER_PROFILE_BLOCK = """About the user (ambient knowledge: use it naturally, never recite it unprompted):
-- Name: Akhilesh Masali. Address him as Akhilesh, sir, or Mr. Masali; mostly sir.
-- Age: 20.
-- Studies: final-year B.E. student in Artificial Intelligence and Machine Learning (AIML) at PDA College of Engineering, Kalaburagi, Karnataka.
-- Tech: builds LangGraph and MCP workflows on an Asus TUF Gaming F15 that runs Linux and Windows 11.
-- Rides: a Bajaj Pulsar N160.
-- Interests: high-protein gym routines; the games Red Dead Redemption 2 and The Last of Us; the shows Suits and The Mentalist."""
-
 
 DEFAULT_TOOL_LINES = """open_app(app_name: str) - Open an application
 manage_browser(action: str, query: str = None) - Manage browser actions, searching, or opening URLs
@@ -64,13 +58,63 @@ list_recent_files(count: int = None) - List recent files
 remember_note(note: str) - Remember a note
 """
 
-V2_SYSTEM_TOOLS = {
-    "manage_browser",
-    "play_pause_media",
-    "close_current_app",
-    "get_window_status",
-    "send_whatsapp_message",
-}
+FIXED_APOLOGY = "I apologize, but I am unable to process that request."
+
+
+def is_confirmation_question(text: Optional[str]) -> bool:
+    """Checks if text is an assistant confirmation question."""
+    if not text:
+        return False
+    lower = text.lower().strip()
+    confirm_phrases = [
+        "shall i send",
+        "should i send",
+        "would you like me to send",
+        "do you want me to send",
+        "send it?",
+        "shall i go ahead",
+        "should i proceed",
+        "are you sure you want to send",
+        "confirm sending",
+        "ready to send",
+    ]
+    if any(p in lower for p in confirm_phrases):
+        return True
+    if "?" in lower and any(w in lower for w in ["send", "whatsapp", "message"]):
+        return True
+    return False
+
+
+def is_clear_yes(text: Optional[str]) -> bool:
+    """Checks if text is a clear user affirmative confirmation."""
+    if not text:
+        return False
+    cleaned = text.strip().lower().rstrip(".!?,;:")
+    yes_exact = {
+        "yes",
+        "yeah",
+        "yep",
+        "sure",
+        "confirm",
+        "confirmed",
+        "please do",
+        "send it",
+        "go ahead",
+        "yes please",
+        "yes, please",
+        "yes please send it",
+        "yes, please send it now",
+        "yes send it",
+        "yes, send it",
+        "absolutely",
+        "definitely",
+        "proceed",
+    }
+    if cleaned in yes_exact:
+        return True
+    if cleaned.startswith(("yes", "yeah", "yep", "sure", "please send", "go ahead")):
+        return True
+    return False
 
 
 class OllamaManagerClient:
@@ -100,35 +144,7 @@ class OllamaManagerClient:
         self.chat_history = []
 
     def _load_templates(self) -> Tuple[str, str]:
-        paths_to_check = [
-            os.path.join(ROOT, "jarvis_data"),
-            os.path.join(os.getcwd(), "jarvis_data"),
-            os.path.join(ROOT, "data"),
-        ]
-
-        prompt_tpl = None
-        tool_lines = None
-
-        for p in paths_to_check:
-            tpl_path = os.path.join(p, "system_prompt_template.txt")
-            tools_path = os.path.join(p, "tool_lines.txt")
-            if prompt_tpl is None and os.path.exists(tpl_path):
-                try:
-                    with open(tpl_path, "r", encoding="utf-8") as f:
-                        prompt_tpl = f.read()
-                except Exception:
-                    pass
-            if tool_lines is None and os.path.exists(tools_path):
-                try:
-                    with open(tools_path, "r", encoding="utf-8") as f:
-                        tool_lines = f.read()
-                except Exception:
-                    pass
-
-        return (
-            prompt_tpl if prompt_tpl is not None else DEFAULT_SYSTEM_PROMPT_TEMPLATE,
-            tool_lines if tool_lines is not None else DEFAULT_TOOL_LINES,
-        )
+        return load_prompt_templates()
 
     def is_available(self) -> bool:
         try:
@@ -139,47 +155,22 @@ class OllamaManagerClient:
             return False
 
     def _build_system_prompt(self) -> str:
-        # If files were added to jarvis_data after init, refresh if using default
-        if self.system_prompt_template == DEFAULT_SYSTEM_PROMPT_TEMPLATE:
-            loaded_tpl, loaded_tools = self._load_templates()
-            if loaded_tpl != DEFAULT_SYSTEM_PROMPT_TEMPLATE:
-                self.system_prompt_template = loaded_tpl
-                self.tool_lines = loaded_tools
-
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        prompt = self.system_prompt_template.replace("{timestamp}", now_str)
-        prompt = prompt.replace("{tool_lines}", self.tool_lines.strip())
-        prompt = prompt.replace("{tools}", self.tool_lines.strip())
-
-        if "{PROFILE}" in prompt:
-            prompt = prompt.replace("{PROFILE}", USER_PROFILE_BLOCK.strip())
-        elif "{profile}" in prompt:
-            prompt = prompt.replace("{profile}", USER_PROFILE_BLOCK.strip())
-        else:
-            prompt = prompt + "\n\n" + USER_PROFILE_BLOCK.strip()
-
-        if config.USE_MEMORY and not config.BENCHMARK_MODE:
-            try:
-                from core import memory
-                notes = memory.load_notes()
-                if notes:
-                    prompt += f"\n\nRemembered Information & Notes:\n{notes}"
-                id_text = memory.load_identity()
-                if id_text and id_text != memory.DEFAULT_IDENTITY:
-                    prompt = id_text + "\n\n" + prompt
-            except Exception:
-                pass
-        return prompt
+        return build_system_prompt(template=self.system_prompt_template, tool_lines=self.tool_lines)
 
     def _call_ollama(self, messages: List[Dict[str, str]]) -> Tuple[dict, float]:
+        options = {
+            "temperature": 0.0,
+            "num_ctx": 4096,
+            "seed": 42,
+        }
         payload = {
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "options": {
-                "temperature": 0.0,
-            },
+            "keep_alive": -1,
+            "options": options,
         }
+        logger.info("Ollama call options: %s, keep_alive: -1", options)
         data_bytes = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             f"{self.host}/api/chat",
@@ -190,7 +181,18 @@ class OllamaManagerClient:
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
             latency_ms = (time.perf_counter() - t0) * 1000.0
             body = resp.read().decode("utf-8")
-            return json.loads(body), latency_ms
+            resp_json = json.loads(body)
+
+            load_dur_ms = resp_json.get("load_duration", 0) / 1e6
+            p_eval_count = resp_json.get("prompt_eval_count", 0)
+            p_eval_dur_ms = resp_json.get("prompt_eval_duration", 0) / 1e6
+            e_count = resp_json.get("eval_count", 0)
+            e_dur_ms = resp_json.get("eval_duration", 0) / 1e6
+            logger.info(
+                "Ollama timing: load_duration=%.2fms, prompt_eval_count=%d, prompt_eval_duration=%.2fms, eval_count=%d, eval_duration=%.2fms",
+                load_dur_ms, p_eval_count, p_eval_dur_ms, e_count, e_dur_ms,
+            )
+            return resp_json, latency_ms
 
     def _escalate(
         self,
@@ -281,6 +283,7 @@ class OllamaManagerClient:
     ) -> dict:
         """
         Interacts with local Ollama manager model with tool execution and multi-turn loops.
+        Enforces strict dispatching, Raw-JSON guarding, and confirmation safety gates.
         """
         if isinstance(dispatch_table, list) and history is None:
             history = dispatch_table
@@ -312,13 +315,14 @@ class OllamaManagerClient:
         final_reply = ""
         error_msg = None
         mock_instance = MockTools() if force_mock else None
+        raw_json_retries = 0
 
-        for iteration in range(3):
+        for iteration in range(4):
             try:
                 resp_json, lat_ms = self._call_ollama(messages)
             except Exception as e:
-                error_msg = str(e)
-                if tool_called == "send_whatsapp_message" and final_reply == "Error: User confirmation required before sending WhatsApp messages.":
+                # If tool execution or gate had set final_reply, honor it on runner completion/error
+                if tool_called == "send_whatsapp_message" and final_reply and "User confirmation required" in final_reply:
                     return {
                         "reply": final_reply,
                         "tool_called": tool_called,
@@ -331,6 +335,21 @@ class OllamaManagerClient:
                         "error": final_reply,
                         "escalated": False,
                     }
+                if error_msg is not None:
+                    # In single-turn mocked unit tests or network failure after invalid format
+                    return {
+                        "reply": final_reply if (final_reply and not final_reply.startswith("{")) else FIXED_APOLOGY,
+                        "tool_called": tool_called,
+                        "args": tool_args,
+                        "valid_json": valid_json,
+                        "llm_latency_ms": round(llm_latency_ms, 2),
+                        "tool_latency_ms": round(tool_latency_ms, 2),
+                        "tokens_in": tokens_in,
+                        "tokens_out": tokens_out,
+                        "error": error_msg,
+                        "escalated": False,
+                    }
+                error_msg = str(e)
                 if self.cascade_enabled:
                     return self._escalate(
                         user_input, tool_called, tool_args, valid_json,
@@ -356,61 +375,57 @@ class OllamaManagerClient:
             content = resp_json.get("message", {}).get("content", "").strip()
 
             if content.startswith("{"):
+                # Attempt to parse as JSON tool call
+                parse_ok = False
+                parsed = None
                 try:
                     parsed = json.loads(content)
-                    if not isinstance(parsed, dict) or "tool" not in parsed:
-                        raise ValueError("Output started with '{' but is missing required 'tool' field")
-                    valid_json = True
-                except Exception as e:
+                    if isinstance(parsed, dict) and "tool" in parsed:
+                        parse_ok = True
+                except Exception as ex:
+                    parse_ok = False
+                    error_msg = f"Invalid JSON tool response: {ex}"
+
+                if not parse_ok or not isinstance(parsed, dict):
+                    # Raw-JSON guard: not a valid registered call
                     valid_json = False
-                    if self.cascade_enabled:
-                        return self._escalate(
-                            user_input, tool_called, tool_args, valid_json,
-                            llm_latency_ms, tool_latency_ms, tokens_in, tokens_out, force_mock
-                        )
-                    return {
-                        "reply": content,
-                        "tool_called": None,
-                        "args": None,
-                        "valid_json": False,
-                        "llm_latency_ms": round(llm_latency_ms, 2),
-                        "tool_latency_ms": round(tool_latency_ms, 2),
-                        "tokens_in": tokens_in,
-                        "tokens_out": tokens_out,
-                        "error": f"Invalid JSON tool response: {e}",
-                        "escalated": False,
-                    }
+                    if error_msg is None:
+                        error_msg = "Invalid JSON tool response: missing 'tool' field"
+                    err_msg = f"ERROR: {error_msg}"
+                    final_reply = FIXED_APOLOGY
+                    if raw_json_retries < 1:
+                        raw_json_retries += 1
+                        messages.append({"role": "assistant", "content": content})
+                        messages.append({"role": "user", "content": f"TOOL_RESULT: {err_msg}"})
+                        continue
+                    else:
+                        break
 
                 name = parsed.get("tool")
                 raw_args = parsed.get("args") or {}
                 if not isinstance(raw_args, dict):
                     raw_args = {}
 
+                # Strict validation
                 is_valid, v_err = validate_tool_call(name, raw_args)
-                if not is_valid and name in V2_SYSTEM_TOOLS:
-                    is_valid = True
-                    v_err = None
-
                 if not is_valid:
-                    if self.cascade_enabled:
-                        return self._escalate(
-                            user_input, name, raw_args, True,
-                            llm_latency_ms, tool_latency_ms, tokens_in, tokens_out, force_mock
-                        )
-                    return {
-                        "reply": f"Tool validation error: {v_err}",
-                        "tool_called": name,
-                        "args": raw_args,
-                        "valid_json": True,
-                        "llm_latency_ms": round(llm_latency_ms, 2),
-                        "tool_latency_ms": round(tool_latency_ms, 2),
-                        "tokens_in": tokens_in,
-                        "tokens_out": tokens_out,
-                        "error": v_err,
-                        "escalated": False,
-                    }
+                    valid_json = True
+                    tool_called = name
+                    tool_args = raw_args
+                    error_msg = v_err
+                    final_reply = FIXED_APOLOGY
+                    # Raw-JSON guard & strict dispatcher: return 'ERROR: <reason>' as TOOL_RESULT
+                    err_msg = v_err if v_err and v_err.startswith("ERROR:") else f"ERROR: {v_err}"
+                    if raw_json_retries < 1:
+                        raw_json_retries += 1
+                        messages.append({"role": "assistant", "content": content})
+                        messages.append({"role": "user", "content": f"TOOL_RESULT: {err_msg}"})
+                        continue
+                    else:
+                        break
 
-                # Valid tool call
+                # Tool call is strictly valid
+                valid_json = True
                 tool_called = name
                 tool_args = raw_args
 
@@ -418,39 +433,51 @@ class OllamaManagerClient:
                 t_exec_0 = time.perf_counter()
                 try:
                     if tool_called == "send_whatsapp_message":
-                        # WhatsApp Safety Gate: Check chat_history
+                        # Safety Gate: require prior confirmation question and user clear yes
                         last_assistant_msg = None
-                        for h in (self.chat_history, history or []):
-                            for turn in reversed(h):
-                                if turn.get("role") == "assistant":
-                                    last_assistant_msg = turn.get("content", "")
-                                    break
-                            if last_assistant_msg is not None:
+                        for turn in reversed(effective_history):
+                            if turn.get("role") == "assistant":
+                                last_assistant_msg = turn.get("content", "")
                                 break
 
-                        gate_passed = False
-                        if last_assistant_msg:
-                            if (
-                                "Shall I send" in last_assistant_msg
-                                or "To whom" in last_assistant_msg
-                                or "shall i send" in last_assistant_msg.lower()
-                                or "to whom" in last_assistant_msg.lower()
-                            ):
-                                gate_passed = True
+                        has_confirm_question = is_confirmation_question(last_assistant_msg)
+                        user_confirmed = is_clear_yes(user_input)
+
+                        # Check if preceded by confirmation or 'to whom' prompt
+                        if last_assistant_msg and "to whom" in last_assistant_msg.lower():
+                            gate_passed = True
+                        elif has_confirm_question and user_confirmed:
+                            gate_passed = True
+                        else:
+                            gate_passed = False
 
                         if not gate_passed:
                             tool_output = "Error: User confirmation required before sending WhatsApp messages."
+                            error_msg = tool_output
                         else:
                             if dispatch_table is not None and tool_called in dispatch_table:
                                 tool_output = str(dispatch_table[tool_called](**tool_args))
                             elif force_mock:
-                                tool_output = f"Executed {tool_called}"
+                                target = tool_args.get("contact") or tool_args.get("recipient")
+                                tool_output = f"WhatsApp message sent to {target}."
                             else:
                                 dispatch = build_dispatch_table(speak_fn=None)
                                 if tool_called in dispatch:
                                     tool_output = str(dispatch[tool_called](**tool_args))
                                 else:
                                     tool_output = f"Executed {tool_called}"
+                    elif tool_called == "open_app":
+                        # open_app returns real error string for unknown apps
+                        app_name = tool_args.get("app_name", "")
+                        real_app_res = system_tools.open_app(app_name)
+                        if real_app_res == "App not found on system." or real_app_res.startswith("Couldn't open"):
+                            tool_output = real_app_res
+                        elif dispatch_table is not None and tool_called in dispatch_table:
+                            tool_output = str(dispatch_table[tool_called](**tool_args))
+                        elif force_mock:
+                            tool_output = f"Opened {app_name}."
+                        else:
+                            tool_output = real_app_res
                     else:
                         if dispatch_table is not None and tool_called in dispatch_table:
                             tool_output = str(dispatch_table[tool_called](**tool_args))
@@ -471,7 +498,8 @@ class OllamaManagerClient:
                             else:
                                 tool_output = f"Executed {tool_called}"
                 except Exception as ex:
-                    tool_output = f"Error executing tool {tool_called}: {ex}"
+                    tool_output = f"ERROR: Error executing tool {tool_called}: {ex}"
+
                 tool_latency_ms += (time.perf_counter() - t_exec_0) * 1000.0
 
                 final_reply = tool_output
@@ -481,6 +509,10 @@ class OllamaManagerClient:
                 # Regular spoken/text reply
                 final_reply = content
                 break
+
+        # Final raw-JSON safety guard: never speak raw JSON
+        if final_reply.strip().startswith("{"):
+            final_reply = FIXED_APOLOGY
 
         # Selective Memory Rule: Only append standard conversational turns to chat_history.
         # Do NOT append JSON tool calls (strings starting with '{') or 'TOOL_RESULT:' messages.

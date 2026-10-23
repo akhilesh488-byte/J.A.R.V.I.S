@@ -1,2 +1,3 @@
 timestamp,trigger,command,reply,stt_ms,exec_ms,total_ms,cpu_pct,ram_pct,gpu_temp_c,power_mode
 2026-10-21T20:20:59.270344,Hey Jarvis (Wake Word),What is the system status?,"Hardware telemetry report, sir.",850.5,120.3,970.8,20,58,57,High Performance
+2026-10-22T02:30:58.052232,Hey Jarvis (Wake Word),Can you hear me clearly and do you have memory?,"I can hear you clearly, sir. And yes, I have memory. I can remember things you tell me and recall them later.",8824.5,51081.8,61528.1,18,88,57,High Performance

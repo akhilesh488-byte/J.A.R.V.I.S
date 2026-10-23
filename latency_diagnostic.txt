@@ -1,0 +1,37 @@
+﻿
+============================================================
+  Ollama Diagnostic: 20 identical short prompts ('ping')
+  Model: jarvis-3b | keep_alive=-1 | num_ctx=4096 | seed=42
+============================================================
+  Call  1/20: load=  34.1ms | prefill= 382.1ms (11 tok) | decode= 116.4ms (4 tok) | total=2752.5ms
+  Call  2/20: load=   4.6ms | prefill= 110.1ms (11 tok) | decode= 209.9ms (4 tok) | total=2351.1ms
+  Call  3/20: load=   5.8ms | prefill= 110.5ms (11 tok) | decode= 223.2ms (4 tok) | total=2398.7ms
+  Call  4/20: load=   9.2ms | prefill= 111.5ms (11 tok) | decode= 244.3ms (4 tok) | total=2392.2ms
+  Call  5/20: load=   5.9ms | prefill= 110.7ms (11 tok) | decode= 247.4ms (4 tok) | total=2399.2ms
+  Call  6/20: load=   5.0ms | prefill= 102.4ms (11 tok) | decode= 230.5ms (4 tok) | total=2403.9ms
+  Call  7/20: load=   3.8ms | prefill= 105.7ms (11 tok) | decode= 243.7ms (4 tok) | total=2406.2ms
+  Call  8/20: load=   5.8ms | prefill= 110.1ms (11 tok) | decode= 244.0ms (4 tok) | total=2412.6ms
+  Call  9/20: load=   4.3ms | prefill= 100.4ms (11 tok) | decode= 243.3ms (4 tok) | total=2408.0ms
+  Call 10/20: load=   6.9ms | prefill= 109.3ms (11 tok) | decode= 255.8ms (4 tok) | total=2404.1ms
+  Call 11/20: load=   4.9ms | prefill= 100.3ms (11 tok) | decode= 251.8ms (4 tok) | total=2410.2ms
+  Call 12/20: load=   6.0ms | prefill= 100.0ms (11 tok) | decode= 251.8ms (4 tok) | total=2407.3ms
+  Call 13/20: load=   4.7ms | prefill= 100.1ms (11 tok) | decode= 258.3ms (4 tok) | total=2408.6ms
+  Call 14/20: load=   3.4ms | prefill= 100.7ms (11 tok) | decode= 268.2ms (4 tok) | total=2405.2ms
+  Call 15/20: load=   5.3ms | prefill= 105.1ms (11 tok) | decode= 258.4ms (4 tok) | total=2413.1ms
+  Call 16/20: load=   6.3ms | prefill= 103.6ms (11 tok) | decode= 254.8ms (4 tok) | total=2406.3ms
+  Call 17/20: load=   3.5ms | prefill= 106.0ms (11 tok) | decode= 243.5ms (4 tok) | total=2412.2ms
+  Call 18/20: load=   4.0ms | prefill= 100.5ms (11 tok) | decode= 262.6ms (4 tok) | total=2407.4ms
+  Call 19/20: load=   6.2ms | prefill= 108.9ms (11 tok) | decode= 260.2ms (4 tok) | total=2414.2ms
+  Call 20/20: load=   3.2ms | prefill= 100.4ms (11 tok) | decode= 260.0ms (4 tok) | total=2410.3ms
+
+--- Summary Split ---
+  Load Duration       : avg=   6.7ms (min=3.2ms, max=34.1ms)
+  Prefill (prompt_eval): avg= 118.9ms (min=100.0ms, max=382.1ms)
+  Decode (eval)       : avg= 241.4ms (min=116.4ms, max=268.2ms)
+  Total Latency       : avg=2421.2ms (min=2351.1ms, max=2752.5ms)
+
+--- `ollama ps` Output ---
+NAME                ID              SIZE      PROCESSOR          CONTEXT    RUNNER      UNTIL   
+jarvis-3b:latest    c89709378b4a    2.9 GB    20%/80% CPU/GPU    4096       llamacpp    Forever
+============================================================
+

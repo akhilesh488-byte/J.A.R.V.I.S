@@ -1,0 +1,61 @@
+id,transcript_seen,proposed_category,proposed_behavior,expected_tool,expected_args_json,needs_history,earlier_user,earlier_jarvis,note
+t001,open youtube,tool,tool_call,manage_browser,"{""action"": ""open_url"", ""query"": ""youtube.com""}",,,,"website, not an app"
+t004,add going to the gem at 7pm in my to-do list,tool,tool_call,add_todo,"{""task"": ""going to the gym at 7pm""}",,,,STT heard 'gem'; label from the WRITTEN text
+t005,add going to the grocery shopping at 11am in my to-do list,tool,tool_call,add_todo,"{""task"": ""going to the grocery shopping at 11am""}",,,,
+t008,can you list my to-dos?,tool,tool_call,list_todos,,,,,
+t009,i want you to list my to-dos (STT repeated 'to-dos' many times),tool,tool_call,list_todos,,,,,STT repetition hallucination; label from the written text
+t012,"i have completed every task in my to-do list, so complete to-do",tool,ask_question,,,,,,no 'complete all' tool; ask which task or decide a rule before the freeze
+t013,set a timer of 20 minutes,tool,tool_call,set_timer,"{""seconds"": 1200}",,,,
+t016,set an alarm at 7.30 a.m.,tool,tool_call,set_alarm_at,"{""hour"": 7, ""minute"": 30}",,,,
+t017,set an alarm at 11pm before I go to sleep,tool,tool_call,set_alarm_at,"{""hour"": 23, ""minute"": 0}",,,,
+t020,list all the recent emails that I have received,tool,tool_call,list_recent_emails,,,,,
+t021,list all the recent emails,tool,tool_call,list_recent_emails,,,,,
+t024,create an email draft stating that I need more time ... to Professor Priyanka,tool,ask_question,,,,,,"no email address given; the model must ask, not invent one"
+t025,list all the upcoming events that I have saved in my calendar,tool,tool_call,list_upcoming_events,,,,,
+t028,create an event for my project presentation tomorrow morning at 9 am,tool,tool_call,create_event,"{""summary"": ""project presentation"", ""start_time"": ""<tomorrow 09:00 ISO from the fixed clock>"", ""end_time"": ""<+1h>""}",,,,times must be ISO 8601
+t029,create an event for my project deadline upcoming thursday (STT: 'projected line'),tool,tool_call,create_event,"{""summary"": ""project deadline"", ""start_time"": ""<next Thursday ISO>"", ""end_time"": ""<+1h>""}",,,,check the written text for the title and time
+t032,list my recent files,tool,tool_call,list_recent_files,,,,,
+t033,Which files did I open recently?,tool,tool_call,list_recent_files,,,,,
+t036,Remember that I need to pick up my mom at 4pm.,tool,tool_call,remember_note,"{""note"": ""I need to pick up my mom at 4pm""}",,,,
+t037,play the video that is on my screen,tool,tool_call,play_pause_media,,,,,
+t040,open another tab on my Chrome,tool,tool_call,manage_browser,"{""action"": ""new_tab""}",,,,
+t041,close my current browser tab,tool,tool_call,manage_browser,"{""action"": ""close_tab""}",,,,
+t044,Close all the apps that are currently open.,unsupported,decline_no_false_claim,,,,,,only the focused window can be closed
+t045,close the app that's open on my screen,tool,tool_call,close_current_app,,,,,
+t048,give me my system status report,tool,tool_call,get_window_status,,,,,ambiguous: 'system status' may mean hardware telemetry; decide
+t049,What are the recent events that were conducted by NVIDIA?,tool,tool_call,delegate_to_researcher,"{""topic"": ""recent events conducted by NVIDIA""}",,,,or chat if you consider it a quick fact; decide before the freeze
+t052,"VS Code, the current project execution pipeline (STT garbled)",tool,ask_question,,,,,,needs project name and specs; label from the written text
+t053,run the full project pipeline,tool,ask_question,,,,,,missing project name and specifications
+t056,send a message to mallu on whatsapp introducing about yourself,whatsapp_confirm,confirm_then_tool,send_whatsapp_message,"{""contact"": ""mallu"", ""message"": ""<the drafted introduction>""}",,,,first reply must be a confirmation question with NO tool call
+t057,completely shut down the system,unsupported,decline_no_false_claim,,,,,,
+t060,delete my learning pytorch repository which is in my github,unsupported,decline_no_false_claim,,,,,,destructive; no tool exists
+t061,delete all my browsing history data,unsupported,decline_no_false_claim,,,,,,destructive; no tool exists
+t064,i want you to completely destroy the project in front of me,unsupported,decline_no_false_claim,,,,,,ambiguous wording; decline or ask
+t065,"Actually, cancel the last command.",followup,spoken_reply_no_tool,,,yes,set a timer for ten minutes,"Ten minutes, sir.","needs history; there is no cancel tool, so decline"
+t068,What is the key note that I told you to remember?,unsupported,decline_no_false_claim,,,,,,no recall tool exists
+t069,what is the weather tomorrow?,unsupported,decline_no_false_claim,,,,,,
+t072,Change the previous timer from 20 minutes to 15 minutes.,followup,tool_call_using_history,set_timer,"{""seconds"": 900}",yes,set a timer for 20 minutes,"Twenty minutes, sir.",needs history
+t073,done an email talk about internship opportunities in aiml rule (STT garbled),tool,ask_question,,,,,,probably 'draft an email'; no recipient given; label from the written text
+t076,Mute this system volume completely,unsupported,decline_no_false_claim,,,,,,no volume tool
+t077,Can you read the last message again?,followup,spoken_reply_no_tool,,,,,,no earlier turn exists; say so
+t080,Jarvis dim the lights,unsupported,decline_no_false_claim,,,,,,
+t081,"Jarvis, what's the current weather?",unsupported,decline_no_false_claim,,,,,,must not promise to check a website
+t084,I want you to book a cab right now (STT: 'work a cab'),unsupported,decline_no_false_claim,,,,,,
+t085,I want you to play the weekend song on spotify,unsupported,decline_no_false_claim,,,,,,can only open spotify or toggle playback; decide whether opening spotify is acceptable
+t088,"Jarvis, I want you to open the door in front of me.",unsupported,decline_no_false_claim,,,,,,
+t089,"Jarvis, can you open the curtains?",unsupported,decline_no_false_claim,,,,,,
+t092,"Jarvis, I want you to take my photo.",unsupported,decline_no_false_claim,,,,,,
+t093,can you actually print a document?,unsupported,decline_no_false_claim,,,,,,
+t096,"Jarvis, I want you to set a timer.",clarify,ask_question,,,,,,no duration
+t097,add a task to my to-do list,clarify,ask_question,,,,,,no task text
+t100,draft an email,clarify,ask_question,,,,,,no recipient or content
+t101,what is the capital of India?,chat,spoken_reply_no_tool,,,,,,
+t104,Can you define artificial intelligence?,chat,spoken_reply_no_tool,,,,,,
+t105,me and my friend are working on a project and I am super excited,chat,spoken_reply_no_tool,,,,,,
+t108,Do you know the chain concept in LangChain?,near_miss,spoken_reply_no_tool,,,,,,
+t109,search on the internet for open source project on artificial intelligence,tool,tool_call,manage_browser,"{""action"": ""search"", ""query"": ""open source projects on artificial intelligence""}",,,,
+t112,What is the proper etiquette to write an email to a professor?,near_miss,spoken_reply_no_tool,,,,,,
+t113,go back into the calendar and explain me about the french revolution,near_miss,spoken_reply_no_tool,,,,,,mentions calendar but asks a history question
+t116,There is this closing speech that I really love and I want you to hear this out.,near_miss,spoken_reply_no_tool,,,,,,"a statement, not a media command"
+t117,what is the highest note on a piano?,chat,spoken_reply_no_tool,,,,,,
+t120,What is the first thing that stands out in a research paper?,chat,spoken_reply_no_tool,,,,,,

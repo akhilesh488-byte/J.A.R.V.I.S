@@ -16,8 +16,21 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(ROOT)
 from tools.tool_registry import TOOL_SIGNATURES, get_tool_schemas
 
-ROOT_TOOL_RESULTS_PATH = os.path.join(ROOT, "tool_results.json")
 BENCH_TOOL_RESULTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tool_results.json")
+ROOT_TOOL_RESULTS_PATH = os.path.join(ROOT, "tool_results.json")
+
+KNOWN_APPS = {
+    "notepad", "calculator", "calc", "chrome", "google chrome", "spotify",
+    "vscode", "vs code", "visual studio code", "code", "terminal", "windows terminal",
+    "cmd", "command prompt", "powershell", "settings", "windows settings",
+    "explorer", "file explorer", "files", "word", "excel", "powerpoint",
+    "slack", "discord", "zoom", "teams", "microsoft teams", "edge", "microsoft edge",
+    "browser", "camera", "paint", "task manager"
+}
+
+VALID_BROWSER_ACTIONS = {
+    "new_tab", "close_tab", "reload", "back", "forward", "search", "open_url"
+}
 
 ALL_KNOWN_TOOLS = set(TOOL_SIGNATURES.keys()) | {
     "manage_browser",
@@ -31,7 +44,7 @@ ALL_KNOWN_TOOLS = set(TOOL_SIGNATURES.keys()) | {
 
 
 def load_tool_results_templates(path: Optional[str] = None) -> Dict[str, str]:
-    target_path = path or (ROOT_TOOL_RESULTS_PATH if os.path.exists(ROOT_TOOL_RESULTS_PATH) else BENCH_TOOL_RESULTS_PATH)
+    target_path = path or (BENCH_TOOL_RESULTS_PATH if os.path.exists(BENCH_TOOL_RESULTS_PATH) else ROOT_TOOL_RESULTS_PATH)
     if os.path.exists(target_path):
         try:
             with open(target_path, "r", encoding="utf-8") as f:
@@ -52,17 +65,36 @@ class BenchmarkMockTools:
         self.calls.clear()
 
     def format_result(self, tool_name: str, kwargs: Dict[str, Any]) -> str:
-        # Check if realistic string template is loaded
+        # 1. Validation matching real tools
+        if tool_name == "open_app":
+            app_name = str(kwargs.get("app_name") or "").strip()
+            if not app_name or app_name.lower() not in KNOWN_APPS:
+                return "App not found on system."
+
+        if tool_name == "manage_browser":
+            action = str(kwargs.get("action") or "").strip().lower()
+            if not action or action not in VALID_BROWSER_ACTIONS:
+                return f"ERROR: Invalid action '{action}'. Valid actions: new_tab, close_tab, reload, back, forward, search, open_url"
+
+        # 2. Return real result-string format from bench/tool_results.json
         template = self.templates.get(tool_name)
         if template:
-            # If template has string format placeholders like {app_name}, format them
+            fmt_kwargs = dict(kwargs)
+            if "contact" in fmt_kwargs and "recipient" not in fmt_kwargs:
+                fmt_kwargs["recipient"] = fmt_kwargs["contact"]
+            if tool_name == "set_alarm_at" and "minute" in fmt_kwargs:
+                try:
+                    fmt_kwargs["minute"] = f"{int(fmt_kwargs['minute']):02d}"
+                except Exception:
+                    pass
+
             if "{" in template and "}" in template:
                 try:
                     class SafeDict(dict):
                         def __missing__(self, key):
                             return f"<{key}>"
 
-                    return template.format_map(SafeDict(kwargs))
+                    return template.format_map(SafeDict(fmt_kwargs))
                 except Exception:
                     return template
             return template
