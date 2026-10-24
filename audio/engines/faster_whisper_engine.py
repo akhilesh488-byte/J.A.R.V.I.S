@@ -36,11 +36,12 @@ _model = None
 def _build_initial_prompt(vocab: list[str] | None) -> str:
     """Build a Whisper initial_prompt from vocabulary + APP_ALIASES keys."""
     words = set(config.APP_ALIASES.keys())
-    # Add hard-coded command vocabulary
+    # Add domain terms and hard-coded command vocabulary
     words.update([
+        "gym", "to-dos", "PyTorch", "LangChain", "GitHub", "WhatsApp", "VS Code", "J.A.R.V.I.S.",
         "Jarvis", "to-do list", "todo", "timer", "open", "add", "mark", "done",
         "complete", "list", "set", "remind", "note", "screenshot", "spotify",
-        "YouTube", "Chrome", "VS Code", "calculator", "terminal",
+        "YouTube", "Chrome", "calculator", "terminal",
     ])
     if vocab:
         words.update(vocab)
@@ -57,38 +58,17 @@ def load_model(reset: bool = False):
     if _model is not None:
         return _model
 
-    from faster_whisper import WhisperModel
-
-    to_try = [config.WHISPER_MODEL_SIZE] + [
-        m for m in _FALLBACK_ORDER if m != config.WHISPER_MODEL_SIZE
-    ]
-    last_err = None
-    for size in to_try:
-        try:
-            _model = WhisperModel(
-                size,
-                device=config.WHISPER_DEVICE,
-                compute_type=config.WHISPER_COMPUTE_TYPE,
-                cpu_threads=2,
-                num_workers=1,
-            )
-            if size != config.WHISPER_MODEL_SIZE:
-                print(
-                    f"[stt/whisper] Warning: fell back to '{size}' "
-                    f"('{config.WHISPER_MODEL_SIZE}' OOM). "
-                    "Set WHISPER_MODEL_SIZE=tiny in .env to silence this."
-                )
-            return _model
-        except (RuntimeError, MemoryError) as e:
-            last_err = e
-            print(f"[stt/whisper] '{size}' failed ({e}), trying smaller…")
-            _model = None
-    raise RuntimeError(f"Could not load any Whisper model. Last error: {last_err}")
+    from bench.providers import get_whisper_pipeline
+    pipeline = get_whisper_pipeline(reset=reset)
+    _model = pipeline.model
+    return _model
 
 
 def reset_model():
     global _model
     _model = None
+    from bench.providers import get_whisper_pipeline
+    get_whisper_pipeline(reset=True)
 
 
 class FasterWhisperEngine(STTEngine):
@@ -102,36 +82,32 @@ class FasterWhisperEngine(STTEngine):
             return False
 
     def _transcribe(self, wav_path: str, vocab: list[str] | None = None) -> TranscriptionResult:
-        model = load_model()
+        from bench.providers import get_whisper_pipeline
+        pipeline = get_whisper_pipeline()
+        prompt = _build_initial_prompt(vocab)
         t0 = time.perf_counter()
 
-        lang = config.WHISPER_LANGUAGE or None  # empty string → None (auto-detect)
-        prompt = _build_initial_prompt(vocab)
-
-        segments, info = model.transcribe(
+        text = pipeline.transcribe(
             wav_path,
-            language=lang,
-            beam_size=config.WHISPER_BEAM_SIZE,
-            temperature=0.0,                      # deterministic; no sampling
-            condition_on_previous_text=False,      # each clip is independent
             initial_prompt=prompt,
-            hotwords=prompt,                       # bias decoder toward known words
-            vad_filter=config.WHISPER_VAD_FILTER,  # strip non-speech
+            timeout=10.0,
+            condition_on_previous_text=False,
+            compression_ratio_threshold=2.4,
+            logprob_threshold=-1.0,
+            language=config.WHISPER_LANGUAGE or None,
+            beam_size=config.WHISPER_BEAM_SIZE,
+            temperature=0.0,
+            vad_filter=config.WHISPER_VAD_FILTER,
             vad_parameters={"min_silence_duration_ms": 500},
         )
-
-        seg_list = list(segments)                 # materialise lazy generator
-        text = " ".join(s.text for s in seg_list).strip()
         latency_ms = (time.perf_counter() - t0) * 1000.0
-
-        avg_lp = float(sum(s.avg_logprob for s in seg_list) / len(seg_list)) if seg_list else None
-        no_sp = float(sum(s.no_speech_prob for s in seg_list) / len(seg_list)) if seg_list else None
 
         return TranscriptionResult(
             text=text,
             latency_ms=latency_ms,
             engine=self.name,
-            avg_logprob=avg_lp,
-            no_speech_prob=no_sp,
-            language=getattr(info, "language", None),
+            avg_logprob=None,
+            no_speech_prob=None,
+            language=config.WHISPER_LANGUAGE or None,
         )
+

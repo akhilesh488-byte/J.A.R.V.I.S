@@ -57,33 +57,57 @@ remember_note(note: str) - Remember a note
 
 
 def load_prompt_templates() -> Tuple[str, str]:
-    """Loads system_prompt_template.txt and tool_lines.txt from disk or defaults."""
-    candidate_dirs = [
-        os.path.join(ROOT, "jarvis_data"),
-        ROOT,
-        os.path.join(ROOT, "data"),
-    ]
+    """Loads system_prompt_template.txt and tool_lines.txt dynamically from the filesystem."""
     template_str = None
     tool_lines_str = None
-    for d in candidate_dirs:
-        t_path = os.path.join(d, "system_prompt_template.txt")
-        tl_path = os.path.join(d, "tool_lines.txt")
-        if template_str is None and os.path.exists(t_path):
+
+    candidate_tpl_paths = [
+        "system_prompt_template.txt",
+        os.path.join(ROOT, "system_prompt_template.txt"),
+        os.path.join(ROOT, "jarvis_data", "system_prompt_template.txt"),
+        os.path.join(ROOT, "data", "system_prompt_template.txt"),
+    ]
+    for p in candidate_tpl_paths:
+        if os.path.exists(p):
             try:
-                with open(t_path, "r", encoding="utf-8") as f:
+                with open(p, "r", encoding="utf-8") as f:
                     template_str = f.read()
+                if template_str:
+                    break
             except Exception:
                 pass
-        if tool_lines_str is None and os.path.exists(tl_path):
+
+    candidate_tool_paths = [
+        "tool_lines.txt",
+        os.path.join(ROOT, "tool_lines.txt"),
+        os.path.join(ROOT, "jarvis_data", "tool_lines.txt"),
+        os.path.join(ROOT, "data", "tool_lines.txt"),
+    ]
+    for p in candidate_tool_paths:
+        if os.path.exists(p):
             try:
-                with open(tl_path, "r", encoding="utf-8") as f:
+                with open(p, "r", encoding="utf-8") as f:
                     tool_lines_str = f.read()
+                if tool_lines_str:
+                    break
             except Exception:
                 pass
-    return (
-        template_str if template_str is not None else DEFAULT_SYSTEM_PROMPT_TEMPLATE,
-        tool_lines_str if tool_lines_str is not None else DEFAULT_TOOL_LINES,
-    )
+
+    if template_str is None:
+        try:
+            with open("system_prompt_template.txt", "r", encoding="utf-8") as f:
+                template_str = f.read()
+        except Exception:
+            template_str = DEFAULT_SYSTEM_PROMPT_TEMPLATE
+
+    if tool_lines_str is None:
+        try:
+            with open("tool_lines.txt", "r", encoding="utf-8") as f:
+                tool_lines_str = f.read()
+        except Exception:
+            tool_lines_str = DEFAULT_TOOL_LINES
+
+    return template_str, tool_lines_str
 
 
 def estimate_tokens(text: str) -> int:
@@ -101,11 +125,12 @@ def build_system_prompt(
     tool_lines: Optional[str] = None,
 ) -> str:
     """
-    Builds the system prompt exactly from template:
-    - Identity & prompt structure from template
-    - Current date/time line
+    Builds the system prompt dynamically from template:
+    - Identity & prompt structure from system_prompt_template.txt
+    - Current date/time line ({timestamp} or {NOW})
     - User profile block (kept even in benchmark mode)
-    - tool_lines.txt verbatim
+    - Available tools ({tool_lines}, {tools}, or {TOOLS}) from tool_lines.txt
+    - First name {FIRST}
     - Only remembered notes memory may be disabled in benchmark mode.
     Logs token count and SHA-256 hash of final prompt.
     """
@@ -116,9 +141,10 @@ def build_system_prompt(
         tools = tool_lines
 
     ts = timestamp or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    prompt = tpl.replace("{timestamp}", ts)
+    prompt = tpl.replace("{timestamp}", ts).replace("{NOW}", ts)
     prompt = prompt.replace("{tool_lines}", tools.strip())
-    prompt = prompt.replace("{tools}", tools.strip())
+    prompt = prompt.replace("{tools}", tools.strip()).replace("{TOOLS}", tools.strip())
+    prompt = prompt.replace("{FIRST}", "Akhilesh")
 
     if "{PROFILE}" in prompt:
         prompt = prompt.replace("{PROFILE}", USER_PROFILE_BLOCK.strip())

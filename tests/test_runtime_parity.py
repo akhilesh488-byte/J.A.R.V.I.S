@@ -39,9 +39,10 @@ class TestPromptParity(unittest.TestCase):
             config.BENCHMARK_MODE = True
             prompt = build_system_prompt(timestamp=fixed_timestamp)
 
-            expected = tpl.replace("{timestamp}", fixed_timestamp)
+            expected = tpl.replace("{timestamp}", fixed_timestamp).replace("{NOW}", fixed_timestamp)
             expected = expected.replace("{tool_lines}", tools.strip())
-            expected = expected.replace("{tools}", tools.strip())
+            expected = expected.replace("{tools}", tools.strip()).replace("{TOOLS}", tools.strip())
+            expected = expected.replace("{FIRST}", "Akhilesh")
             if "{PROFILE}" in expected:
                 expected = expected.replace("{PROFILE}", USER_PROFILE_BLOCK.strip())
             elif "{profile}" in expected:

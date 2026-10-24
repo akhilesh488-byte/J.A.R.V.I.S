@@ -12,18 +12,310 @@ Implements:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from bench.baselines.regex_router import RegexBaselineRouter
 from core import memory
 from tools.tool_registry import build_dispatch_table, validate_tool_call
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_WHISPER_INITIAL_PROMPT = (
+    "gym, to-dos, PyTorch, LangChain, GitHub, WhatsApp, VS Code, J.A.R.V.I.S."
+)
+
+
+def filter_repetitive_ngrams(text: str, max_consecutive: int = 4) -> str:
+    """
+    Deterministic post-processing function that splits the transcript into bigrams,
+    checks the repetition frequency, and truncates the string if any bigram repeats
+    more than 4 consecutive times (e.g., safely pruning the 'to-dos of to-dos' loop).
+    """
+    if not text or not isinstance(text, str):
+        return "" if text is None else str(text)
+
+    words = text.split()
+    if len(words) < 2:
+        return text
+
+    # Explicitly form bigrams from consecutive tokens
+    bigrams = [f"{words[i]} {words[i+1]}" for i in range(len(words) - 1)]
+
+    earliest_cutoff = len(words)
+
+    # 1. Stride-2 check: standard alternating 2-word phrase cycle (e.g., "to-dos of to-dos of...")
+    for start in range(len(words) - 1):
+        bg = (words[start], words[start + 1])
+        count = 1
+        curr = start + 2
+        while curr < len(words) - 1 and (words[curr], words[curr + 1]) == bg:
+            count += 1
+            if count > max_consecutive:
+                earliest_cutoff = min(earliest_cutoff, curr)
+                break
+            curr += 2
+
+    # 2. Stride-1 check: unigram repetition yielding consecutive identical bigrams (e.g., "word word word...")
+    for start in range(len(words) - 1):
+        bg = (words[start], words[start + 1])
+        count = 1
+        curr = start + 1
+        while curr < len(words) - 1 and (words[curr], words[curr + 1]) == bg:
+            count += 1
+            if count > max_consecutive:
+                earliest_cutoff = min(earliest_cutoff, curr)
+                break
+            curr += 1
+
+    if earliest_cutoff < len(words):
+        return " ".join(words[:earliest_cutoff])
+    return text
+
+
+filter_repetitive_bigrams = filter_repetitive_ngrams
+filter_bigram_repetition = filter_repetitive_ngrams
+prune_bigram_repetition = filter_repetitive_ngrams
+
+
+class FasterWhisperPipeline:
+    """
+    Production-grade Faster-Whisper Speech-to-Text pipeline meeting reliability standards:
+    1. Hardware Explicit Typing: Strict 'cuda' with 'float16', graceful fallback to 'cpu' with 'int8' on OOM/init error.
+    2. Context Seeding: Biases decoder with high-frequency domain vocabulary.
+    3. Algorithmic Repetition Guards: condition_on_previous_text=False, compression_ratio_threshold=2.4, logprob_threshold=-1.0.
+    4. Post-Processing N-Gram Filter: Deterministically prunes repetitive loops (>4 consecutive bigrams).
+    5. Execution Timeout: Strict 10-second timeout to prevent indefinite hangs on degenerate audio.
+    """
+
+    DEFAULT_INITIAL_PROMPT: str = DEFAULT_WHISPER_INITIAL_PROMPT
+    DEFAULT_TIMEOUT: float = 10.0
+
+    def __init__(
+        self,
+        model_size: Optional[str] = None,
+        device: Optional[str] = None,
+        compute_type: Optional[str] = None,
+        model: Optional[Any] = None,
+        cpu_threads: int = 4,
+        num_workers: int = 1,
+    ):
+        self.model_size = model_size or getattr(config, "WHISPER_MODEL_SIZE", "base")
+        self.cpu_threads = cpu_threads
+        self.num_workers = num_workers
+        self.model = model
+        self.device = device
+        self.compute_type = compute_type
+
+        if self.model is None:
+            self._initialize_model(device=device, compute_type=compute_type)
+        else:
+            self.device = device or "cuda"
+            self.compute_type = compute_type or "float16"
+
+    def _initialize_model(
+        self, device: Optional[str] = None, compute_type: Optional[str] = None
+    ) -> None:
+        """
+        Instantiate the Whisper model strictly with device="cuda" and compute_type="float16".
+        Wrap this in a try/except block that catches CUDA OOM or initialization failures,
+        falling back gracefully to device="cpu" and compute_type="int8".
+        """
+        from faster_whisper import WhisperModel
+
+        target_device = device or "cuda"
+        target_compute = compute_type or "float16"
+
+        if target_device == "cuda":
+            try:
+                candidate_model = WhisperModel(
+                    self.model_size,
+                    device="cuda",
+                    compute_type="float16",
+                    cpu_threads=self.cpu_threads,
+                    num_workers=self.num_workers,
+                )
+                # Verify CUDA kernels are functional (CTranslate2 lazy-loads cublas/cudnn on first tensor op)
+                import numpy as np
+                dummy = np.zeros(16000, dtype=np.float32)
+                list(candidate_model.transcribe(dummy)[0])
+
+                self.model = candidate_model
+                self.device = "cuda"
+                self.compute_type = "float16"
+                return
+            except Exception as e:
+                logger.warning(
+                    f"[FasterWhisperPipeline] CUDA initialization or OOM failure ({e}). "
+                    f"Falling back gracefully to device='cpu', compute_type='int8'..."
+                )
+
+        # Fallback to CPU with int8 quantization
+        self.model = WhisperModel(
+            self.model_size,
+            device="cpu",
+            compute_type="int8",
+            cpu_threads=self.cpu_threads,
+            num_workers=self.num_workers,
+        )
+        self.device = "cpu"
+        self.compute_type = "int8"
+
+    def transcribe(
+        self,
+        audio: Any,
+        initial_prompt: Optional[str] = None,
+        timeout: float = DEFAULT_TIMEOUT,
+        condition_on_previous_text: bool = False,
+        compression_ratio_threshold: float = 2.4,
+        logprob_threshold: float = -1.0,
+        **kwargs,
+    ) -> str:
+        """
+        Transcribes audio with context seeding, algorithmic repetition guards,
+        strict 10-second timeout, and post-processing n-gram filtering.
+        """
+        result_container: List[str] = []
+        error_container: List[Exception] = []
+
+        def _worker():
+            try:
+                res = self._transcribe_internal(
+                    audio=audio,
+                    initial_prompt=initial_prompt,
+                    condition_on_previous_text=condition_on_previous_text,
+                    compression_ratio_threshold=compression_ratio_threshold,
+                    logprob_threshold=logprob_threshold,
+                    **kwargs,
+                )
+                result_container.append(res)
+            except Exception as exc:
+                error_container.append(exc)
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+        thread.join(timeout=timeout)
+
+        if thread.is_alive():
+            raise TimeoutError(
+                f"Faster-Whisper transcription exceeded strict {timeout}-second timeout on audio input"
+            )
+        if error_container:
+            raise error_container[0]
+
+        return result_container[0] if result_container else ""
+
+    def _transcribe_internal(
+        self,
+        audio: Any,
+        initial_prompt: Optional[str] = None,
+        condition_on_previous_text: bool = False,
+        compression_ratio_threshold: float = 2.4,
+        logprob_threshold: float = -1.0,
+        **kwargs,
+    ) -> str:
+        if self.model is None:
+            self._initialize_model()
+
+        seed_prompt = (
+            initial_prompt
+            if initial_prompt is not None
+            else self.DEFAULT_INITIAL_PROMPT
+        )
+
+        transcribe_args = {
+            "initial_prompt": seed_prompt,
+            "condition_on_previous_text": condition_on_previous_text,
+            "compression_ratio_threshold": compression_ratio_threshold,
+        }
+        for k, v in kwargs.items():
+            if k not in transcribe_args:
+                transcribe_args[k] = v
+
+        # Parameter name compatibility:
+        # CTranslate2 / faster-whisper uses log_prob_threshold
+        # OpenAI Whisper API uses logprob_threshold
+        try:
+            try:
+                segments, info = self.model.transcribe(
+                    audio,
+                    logprob_threshold=logprob_threshold,
+                    **transcribe_args,
+                )
+            except TypeError as te:
+                if "logprob_threshold" in str(te) or "unexpected keyword" in str(te):
+                    segments, info = self.model.transcribe(
+                        audio,
+                        log_prob_threshold=logprob_threshold,
+                        **transcribe_args,
+                    )
+                else:
+                    raise
+        except Exception as e:
+            if self.device == "cuda" and (
+                "cublas" in str(e).lower()
+                or "cuda" in str(e).lower()
+                or "out of memory" in str(e).lower()
+            ):
+                logger.warning(
+                    f"[FasterWhisperPipeline] CUDA runtime failure ({e}). "
+                    f"Falling back gracefully to CPU int8..."
+                )
+                self._initialize_model(device="cpu", compute_type="int8")
+                return self._transcribe_internal(
+                    audio=audio,
+                    initial_prompt=initial_prompt,
+                    condition_on_previous_text=condition_on_previous_text,
+                    compression_ratio_threshold=compression_ratio_threshold,
+                    logprob_threshold=logprob_threshold,
+                    **kwargs,
+                )
+            raise
+
+        seg_list = list(segments)
+        raw_text = " ".join(s.text for s in seg_list).strip()
+
+        # Deterministic bigram post-processing filter
+        pruned_text = filter_repetitive_ngrams(raw_text, max_consecutive=4)
+        return pruned_text
+
+
+_GLOBAL_PIPELINE: Optional[FasterWhisperPipeline] = None
+
+
+def get_whisper_pipeline(
+    model_size: Optional[str] = None,
+    reset: bool = False,
+    device: Optional[str] = None,
+    compute_type: Optional[str] = None,
+) -> FasterWhisperPipeline:
+    global _GLOBAL_PIPELINE
+    if reset or _GLOBAL_PIPELINE is None:
+        _GLOBAL_PIPELINE = FasterWhisperPipeline(
+            model_size=model_size,
+            device=device,
+            compute_type=compute_type,
+        )
+    return _GLOBAL_PIPELINE
+
+
+def transcribe_audio(
+    audio: Any,
+    initial_prompt: Optional[str] = None,
+    timeout: float = FasterWhisperPipeline.DEFAULT_TIMEOUT,
+    **kwargs,
+) -> str:
+    pipeline = get_whisper_pipeline()
+    return pipeline.transcribe(audio, initial_prompt=initial_prompt, timeout=timeout, **kwargs)
+
 
 V2_SYSTEM_TOOLS = {
     "manage_browser",
@@ -36,34 +328,11 @@ V2_SYSTEM_TOOLS = {
 
 def build_benchmark_system_prompt() -> str:
     """
-    Builds clean system prompt for benchmarks.
-    Profile injection and memory notes are strictly OFF.
+    Builds clean system prompt for benchmarks dynamically from system_prompt_template.txt
+    and tool_lines.txt instead of hardcoded strings.
     """
-    identity = memory.load_identity()
-    tools_block = """You have access to the following desktop tools:
-- open_app(app_name: str) - Open an application
-- manage_browser(action: str, query: str = None) - Manage browser actions, searching, or opening URLs
-- play_pause_media() - Toggle media playback
-- close_current_app(window_title: str = None) - Close active application
-- get_window_status() - Get active window and open applications
-- send_whatsapp_message(recipient: str, message: str) - Send a WhatsApp message
-- add_todo(task: str) - Add a task to to-do list
-- list_todos() - List current to-do items
-- complete_todo(task_hint: str) - Mark to-do item as done
-- set_timer(seconds: int, label: str = None) - Set a countdown timer
-- set_alarm_at(hour: int, minute: int, label: str = None) - Set an alarm
-- list_recent_emails(count: int = None) - List recent emails
-- create_email_draft(to: str, subject: str, body: str) - Create email draft
-- list_upcoming_events(count: int = None) - List calendar events
-- create_event(summary: str, start_time: str, end_time: str, description: str = None) - Create calendar event
-- list_recent_files(count: int = None) - List recent files
-- remember_note(note: str) - Remember a note
-
-If you need to call a tool, respond ONLY with a JSON object in this exact format:
-{"tool": "<tool_name>", "args": {<argument_name>: <value>}}
-Do NOT wrap the JSON in markdown code fences.
-If no tool is needed or after receiving TOOL_RESULT, respond naturally and concisely to the user."""
-    return f"{identity}\n\n{tools_block}"
+    from core.prompt import build_system_prompt
+    return build_system_prompt()
 
 
 class BenchmarkProvider:
@@ -542,6 +811,52 @@ class StubBenchmarkProvider(BenchmarkProvider):
         }
 
 
+class FasterWhisperSTTProvider(BenchmarkProvider):
+    name = "faster_whisper"
+
+    def __init__(
+        self,
+        model_tag: Optional[str] = None,
+        device: Optional[str] = None,
+        compute_type: Optional[str] = None,
+        pipeline: Optional[FasterWhisperPipeline] = None,
+    ):
+        self.model = model_tag or getattr(config, "WHISPER_MODEL_SIZE", "base")
+        self.pipeline = pipeline or FasterWhisperPipeline(
+            model_size=self.model,
+            device=device,
+            compute_type=compute_type,
+        )
+        self.quant = self.pipeline.compute_type or "float16"
+
+    def ask(
+        self,
+        text: str,
+        dispatch_table: Dict[str, Callable[..., str]],
+        history: Optional[List[Dict[str, str]]] = None,
+    ) -> Dict[str, Any]:
+        t0 = time.perf_counter()
+        if os.path.exists(text):
+            transcribed = self.pipeline.transcribe(text)
+        else:
+            transcribed = text
+        elapsed = (time.perf_counter() - t0) * 1000.0
+        return {
+            "reply": transcribed,
+            "tool_called": None,
+            "args": {},
+            "valid_json": False,
+            "ttft_ms": round(elapsed, 2),
+            "total_ms": round(elapsed, 2),
+            "tokens_in": len(transcribed.split()),
+            "tokens_out": len(transcribed.split()),
+            "iterations": 1,
+            "model": self.model,
+            "quant": self.quant,
+            "error": None,
+        }
+
+
 def get_provider(provider_name: str, model_tag: Optional[str] = None) -> BenchmarkProvider:
     prov_lower = (provider_name or "").strip().lower()
     if prov_lower in ("stub", "mock", "test"):
@@ -552,6 +867,9 @@ def get_provider(provider_name: str, model_tag: Optional[str] = None) -> Benchma
         return OllamaBenchmarkProvider(model_tag=model_tag)
     elif prov_lower in ("claude", "openai", "gemini", "cloud"):
         return CloudBenchmarkProvider(provider_name=provider_name)
+    elif prov_lower in ("whisper", "faster_whisper", "stt"):
+        return FasterWhisperSTTProvider(model_tag=model_tag)
     else:
         # Default: treat as Ollama model tag or fallback to Ollama
         return OllamaBenchmarkProvider(model_tag=provider_name)
+
